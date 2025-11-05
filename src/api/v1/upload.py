@@ -35,118 +35,18 @@ async def get_current_user(authorization: str = Header(None, alias="Authorizatio
             logger.info(f"Extracted API key: {api_key[:15]}...")
 
             if api_key.startswith("sk-"):
-                # Validate API key using database verification function
+                # Validate API key using database verify_api_key function
                 try:
-                    derived_shortcode = api_key[-6:]
-                    logger.info(f"Testing key with shortcode: {derived_shortcode}")
+                    logger.info("Validating API key using database function")
 
-                    # Use direct table query instead of RPC for reliability
-                    # For now, skip shortcode lookup and use direct hash comparison
-                    # This is a temporary fix until proper shortcode generation is implemented
-                    logger.info("Using direct hash lookup instead of shortcode")
-                    # Get all active keys and check hashes (inefficient but works for testing)
-                    all_keys = supabase.table("api_keys").select("*").eq("is_active", True).execute()
-                    found_key = None
-                    for key_record in all_keys.data:
-                        import hashlib
-                        computed_hash = hashlib.sha256(api_key.encode()).hexdigest()
-                        if computed_hash == key_record["key_hash"]:
-                            found_key = key_record
-                            break
+                    # Call the database function to verify the key
+                    verification_result = supabase.rpc("verify_api_key", {"api_key_text": api_key}).execute()
 
-                    if found_key:
-                        logger.info(f"Found key record: id={found_key['id']}, kb_id={found_key.get('kb_id')}")
+                    logger.info(f"Verification result: {verification_result.data}")
 
-                        # Check expiration
-                        expires_at = found_key.get("expires_at")
-                        if expires_at:
-                            try:
-                                expiry_dt = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
-                                if expiry_dt < datetime.utcnow():
-                                    logger.warning("API key expired")
-                                    result = type('MockResult', (), {'data': [{'is_valid': False}]})()
-                                else:
-                                    logger.info("API key valid and not expired")
-                                    result = type('MockResult', (), {'data': [{
-                                        'is_valid': True,
-                                        'api_key_id': found_key['id'],
-                                        'org_id': found_key['org_id'],
-                                        'kb_id': found_key['kb_id'],
-                                        'permissions': found_key['permissions']
-                                    }]})()
-                            except Exception as e:
-                                logger.error(f"Error parsing expiration date: {e}")
-                                result = type('MockResult', (), {'data': [{'is_valid': False}]})()
-                        else:
-                            logger.info("API key valid (no expiration)")
-                            result = type('MockResult', (), {'data': [{
-                                'is_valid': True,
-                                'api_key_id': found_key['id'],
-                                'org_id': found_key['org_id'],
-                                'kb_id': found_key['kb_id'],
-                                'permissions': found_key['permissions']
-                            }]})()
-                    else:
-                        logger.warning("No API key found with matching hash")
-                        result = type('MockResult', (), {'data': [{'is_valid': False}]})()
-
-                    logger.info(f"Key query result: {len(key_query.data) if key_query.data else 0} records found")
-
-                    if key_query.data:
-                        key_record = key_query.data[0]
-                        logger.info(f"Found key record: id={key_record['id']}, kb_id={key_record.get('kb_id')}")
-
-                        import hashlib
-                        hashed_key = hashlib.sha256(api_key.encode()).hexdigest()
-                        stored_hash = key_record["key_hash"]
-
-                        logger.info(f"Hash comparison: computed={hashed_key[:16]}..., stored={stored_hash[:16]}...")
-
-                        if key_record["key_hash"] == hashed_key:
-                            # Check expiration
-                            expires_at = key_record.get("expires_at")
-                            if expires_at:
-                                try:
-                                    expiry_dt = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
-                                    if expiry_dt < datetime.utcnow():
-                                        logger.warning("API key expired")
-                                        result = type('MockResult', (), {'data': [{'is_valid': False}]})()
-                                    else:
-                                        logger.info("API key valid and not expired")
-                                        result = type('MockResult', (), {'data': [{
-                                            'is_valid': True,
-                                            'api_key_id': key_record['id'],
-                                            'org_id': key_record['org_id'],
-                                            'kb_id': key_record['kb_id'],
-                                            'permissions': key_record['permissions']
-                                        }]})()
-                                except Exception as e:
-                                    logger.error(f"Error parsing expiration date: {e}")
-                                    result = type('MockResult', (), {'data': [{'is_valid': False}]})()
-                            else:
-                                logger.info("API key valid (no expiration)")
-                                result = type('MockResult', (), {'data': [{
-                                    'is_valid': True,
-                                    'api_key_id': key_record['id'],
-                                    'org_id': key_record['org_id'],
-                                    'kb_id': key_record['kb_id'],
-                                    'permissions': key_record['permissions']
-                                }]})()
-                        else:
-                            logger.warning("Hash mismatch - invalid API key")
-                            result = type('MockResult', (), {'data': [{'is_valid': False}]})()
-                    else:
-                        logger.warning(f"No active API key found with shortcode: {derived_shortcode}")
-                        result = type('MockResult', (), {'data': [{'is_valid': False}]})()
-
-                    logger.info(f"Verification result: {result.data}")
-
-                    if result and result.data and len(result.data) > 0 and result.data[0]["is_valid"]:
-                        key_info = result.data[0]
+                    if verification_result.data and len(verification_result.data) > 0 and verification_result.data[0]["is_valid"]:
+                        key_info = verification_result.data[0]
                         logger.info(f"Valid key found: kb_id = {key_info.get('kb_id')}, org_id = {key_info.get('org_id')}")
-
-                        # Update last_used_at
-                        supabase.rpc("update_key_last_used", {"key_id": key_info["api_key_id"]}).execute()
 
                         return TokenData(
                             user_id="api_key_user",

@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 import hashlib
 import logging
+from datetime import datetime
 
 from src.core.database import supabase
 
@@ -27,25 +28,60 @@ async def get_current_user(authorization: str = Header(None, alias="Authorizatio
             logger.info(f"Extracted API key: {api_key[:15]}...")
 
             if api_key.startswith("sk-"):
-                # Validate API key using database verification function
+                # Validate API key using direct hash lookup
                 try:
-                    derived_shortcode = api_key[-6:]
-                    logger.info(f"Testing key with shortcode: {derived_shortcode}")
+                    logger.info("KB: Validating API key using direct hash lookup")
 
-                    # Use the verify_api_key database function
-                    result = supabase.rpc(
-                        "verify_api_key",
-                        {
-                            "plain_key": api_key,
-                            "key_shortcode": derived_shortcode
-                        }
-                    ).execute()
+                    # Hash the incoming API key
+                    import hashlib
+                    computed_hash = hashlib.sha256(api_key.encode()).hexdigest()
+                    logger.info(f"KB: Computed hash: {computed_hash[:16]}...")
 
-                    logger.info(f"Verification result: {result.data}")
+                    # Look up the API key by hash
+                    key_query = supabase.table("api_keys").select("*").eq("key_hash", computed_hash).eq("is_active", True).execute()
 
-                    if result.data and len(result.data) > 0 and result.data[0]["is_valid"]:
+                    logger.info(f"KB: Key lookup result: {len(key_query.data) if key_query.data else 0} records found")
+
+                    if key_query.data:
+                        found_key = key_query.data[0]
+                        logger.info(f"KB: Found key record: id={found_key['id']}, kb_id={found_key.get('kb_id')}")
+
+                        # Check expiration
+                        expires_at = found_key.get("expires_at")
+                        if expires_at:
+                            try:
+                                expiry_dt = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+                                if expiry_dt < datetime.utcnow():
+                                    logger.warning("KB: API key expired")
+                                    result = type('MockResult', (), {'data': [{'is_valid': False}]})()
+                                else:
+                                    logger.info("KB: API key valid and not expired")
+                                    result = type('MockResult', (), {'data': [{
+                                        'is_valid': True,
+                                        'api_key_id': found_key['id'],
+                                        'org_id': found_key['org_id'],
+                                        'kb_id': found_key['kb_id'],
+                                        'permissions': found_key['permissions']
+                                    }]})()
+                            except Exception as e:
+                                logger.error(f"KB: Error parsing expiration date: {e}")
+                                result = type('MockResult', (), {'data': [{'is_valid': False}]})()
+                        else:
+                            logger.info("KB: API key valid (no expiration)")
+                            result = type('MockResult', (), {'data': [{
+                                'is_valid': True,
+                                'api_key_id': found_key['id'],
+                                'org_id': found_key['org_id'],
+                                'kb_id': found_key['kb_id'],
+                                'permissions': found_key['permissions']
+                            }]})()
+                    else:
+                        logger.warning("KB: No API key found with matching hash")
+                        result = type('MockResult', (), {'data': [{'is_valid': False}]})()
+
+                    if result and result.data and len(result.data) > 0 and result.data[0]["is_valid"]:
                         key_info = result.data[0]
-                        logger.info(f"Valid key found: kb_id = {key_info.get('kb_id')}, org_id = {key_info.get('org_id')}")
+                        logger.info(f"KB: Valid key found: kb_id = {key_info.get('kb_id')}, org_id = {key_info.get('org_id')}")
 
                         # Update last_used_at
                         supabase.rpc("update_key_last_used", {"key_id": key_info["api_key_id"]}).execute()
@@ -56,7 +92,7 @@ async def get_current_user(authorization: str = Header(None, alias="Authorizatio
                             kb_id=key_info.get("kb_id")
                         )
                     else:
-                        logger.warning("Key not valid or kb_id is null")
+                        logger.warning("KB: Key not valid or kb_id is null")
                         raise HTTPException(
                             status_code=status.HTTP_401_UNAUTHORIZED,
                             detail="Invalid API key"
@@ -64,7 +100,7 @@ async def get_current_user(authorization: str = Header(None, alias="Authorizatio
                 except HTTPException:
                     raise
                 except Exception as e:
-                    logger.error(f"Verification error: {e}")
+                    logger.error(f"KB: Verification error: {e}")
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail="API key verification failed"
