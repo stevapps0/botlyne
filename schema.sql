@@ -2,37 +2,48 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "vector";
 
--- Custom types
-CREATE TYPE user_role AS ENUM ('admin', 'member');
-CREATE TYPE conversation_status AS ENUM ('ongoing', 'resolved_ai', 'resolved_human', 'escalated');
-CREATE TYPE message_sender AS ENUM ('user', 'ai');
+-- Custom types (with IF NOT EXISTS to avoid conflicts)
+DO $$ BEGIN
+    CREATE TYPE user_role AS ENUM ('admin', 'member');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
 
--- Organizations table
-CREATE TABLE organizations (
+DO $$ BEGIN
+    CREATE TYPE conversation_status AS ENUM ('ongoing', 'resolved_ai', 'resolved_human', 'escalated');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE message_sender AS ENUM ('user', 'ai');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+-- Create tables (with IF NOT EXISTS to avoid conflicts)
+CREATE TABLE IF NOT EXISTS organizations (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name TEXT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Users table (extends Supabase auth.users)
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
     org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     role user_role DEFAULT 'member',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Knowledge bases table
-CREATE TABLE knowledge_bases (
+CREATE TABLE IF NOT EXISTS knowledge_bases (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Files table (for uploaded files/URLs)
-CREATE TABLE files (
+CREATE TABLE IF NOT EXISTS files (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     kb_id UUID NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
     filename TEXT NOT NULL,
@@ -44,8 +55,7 @@ CREATE TABLE files (
     uploaded_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Documents table (for vectorized content chunks)
-CREATE TABLE documents (
+CREATE TABLE IF NOT EXISTS documents (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     kb_id UUID NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
     file_id UUID REFERENCES files(id) ON DELETE SET NULL, -- Link to source file/URL
@@ -55,8 +65,7 @@ CREATE TABLE documents (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Conversations table
-CREATE TABLE conversations (
+CREATE TABLE IF NOT EXISTS conversations (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     kb_id UUID NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
@@ -65,8 +74,7 @@ CREATE TABLE conversations (
     resolved_at TIMESTAMPTZ
 );
 
--- Messages table
-CREATE TABLE messages (
+CREATE TABLE IF NOT EXISTS messages (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     conv_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     sender message_sender NOT NULL,
@@ -74,8 +82,20 @@ CREATE TABLE messages (
     timestamp TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Metrics table
-CREATE TABLE metrics (
+CREATE TABLE IF NOT EXISTS api_keys (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    key_hash TEXT NOT NULL UNIQUE,
+    permissions JSONB DEFAULT '{"read": true, "write": true, "admin": false}',
+    created_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    last_used_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS metrics (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     conv_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE UNIQUE,
     response_time FLOAT,
@@ -86,17 +106,20 @@ CREATE TABLE metrics (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Indexes for performance
-CREATE INDEX idx_users_org_id ON users(org_id);
-CREATE INDEX idx_knowledge_bases_org_id ON knowledge_bases(org_id);
-CREATE INDEX idx_files_kb_id ON files(kb_id);
-CREATE INDEX idx_documents_kb_id ON documents(kb_id);
-CREATE INDEX idx_documents_file_id ON documents(file_id);
-CREATE INDEX idx_documents_embedding ON documents USING ivfflat (embedding vector_cosine_ops);
-CREATE INDEX idx_conversations_user_id ON conversations(user_id);
-CREATE INDEX idx_conversations_kb_id ON conversations(kb_id);
-CREATE INDEX idx_messages_conv_id ON messages(conv_id);
-CREATE INDEX idx_metrics_conv_id ON metrics(conv_id);
+-- Indexes for performance (with IF NOT EXISTS)
+CREATE INDEX IF NOT EXISTS idx_users_org_id ON users(org_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_bases_org_id ON knowledge_bases(org_id);
+CREATE INDEX IF NOT EXISTS idx_files_kb_id ON files(kb_id);
+CREATE INDEX IF NOT EXISTS idx_documents_kb_id ON documents(kb_id);
+CREATE INDEX IF NOT EXISTS idx_documents_file_id ON documents(file_id);
+CREATE INDEX IF NOT EXISTS idx_documents_embedding ON documents USING ivfflat (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_kb_id ON conversations(kb_id);
+CREATE INDEX IF NOT EXISTS idx_messages_conv_id ON messages(conv_id);
+CREATE INDEX IF NOT EXISTS idx_metrics_conv_id ON metrics(conv_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_org_id ON api_keys(org_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash);
+CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(is_active) WHERE is_active = true;
 
 -- RPC function for vector similarity search
 CREATE OR REPLACE FUNCTION match_documents(
@@ -145,6 +168,7 @@ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE metrics ENABLE ROW LEVEL SECURITY;
+ALTER TABLE api_keys ENABLE ROW LEVEL SECURITY;
 
 -- Row Level Security Policies
 -- Organizations: Users can only see their own org
@@ -178,6 +202,10 @@ CREATE POLICY "messages_all_policy" ON messages
 -- Metrics: Access via conversation
 CREATE POLICY "metrics_all_policy" ON metrics
     FOR ALL USING (conv_id IN (SELECT id FROM conversations WHERE user_id = auth.uid()));
+
+-- API Keys: Organization admins can manage their org's API keys
+CREATE POLICY "api_keys_all_policy" ON api_keys
+    FOR ALL USING (org_id = get_user_org_id(auth.uid()));
 
 -- Triggers for updated_at
 CREATE OR REPLACE FUNCTION update_updated_at_column()

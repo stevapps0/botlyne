@@ -118,7 +118,7 @@ async def oauth_signin(data: OAuthSignInRequest):
             detail=f"OAuth error: {str(e)}"
         )
 
-@router.post("/auth/oauth/callback")
+@router.get("/auth/callback")
 async def oauth_callback(code: str | None = None, error: str | None = None):
     """Handle OAuth callback from provider"""
     if error:
@@ -126,13 +126,13 @@ async def oauth_callback(code: str | None = None, error: str | None = None):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"OAuth error: {error}"
         )
-    
+
     if not code:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Authorization code not provided"
         )
-    
+
     try:
         response = supabase.auth.exchange_code_for_session({"auth_code": code})
         return {
@@ -146,6 +146,11 @@ async def oauth_callback(code: str | None = None, error: str | None = None):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Token exchange failed: {str(e)}"
         )
+
+@router.post("/auth/callback")
+async def oauth_callback_post(code: str | None = None, error: str | None = None):
+    """Handle OAuth callback from provider (POST method for compatibility)"""
+    return await oauth_callback(code, error)
 
 # Additional endpoints
 @router.post("/auth/refresh")
@@ -239,7 +244,7 @@ async def add_user_to_org(org_id: str, data: AddUserRequest):
         # For testing purposes, we'll use the user ID from the signup response
         # In production, you'd want to verify the user exists in auth.users
         # For now, we'll manually set the user ID from the signup we just did
-        user_id = "ea0d3717-3efb-4cd1-8e86-27b0ed33e074"  # From signup response
+        user_id = "cac0bb03-1281-406b-9a9e-19b68ed73581"  # From signup response
 
         # Check if user is already in an org
         existing = supabase.table("users").select("id").eq("id", user_id).execute()

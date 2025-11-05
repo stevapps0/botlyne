@@ -20,8 +20,19 @@ class TokenData(BaseModel):
 
 # Dependency to get current user
 async def get_current_user(token: str = Depends(lambda: None)):
-    """Extract and validate user from JWT token."""
+    """Extract and validate user from JWT token or API key."""
     try:
+        # Check for org API key
+        if token and token.startswith("Bearer "):
+            api_key = token.replace("Bearer ", "")
+            if api_key.startswith("kb_") or api_key.startswith("sk-"):
+                # Validate API key
+                import hashlib
+                key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+                key_data = supabase.table("api_keys").select("*").eq("key_hash", key_hash).eq("is_active", True).single().execute()
+                if key_data.data:
+                    return TokenData(user_id="api_key_user", org_id=key_data.data["org_id"])
+
         # This is a simplified version - in real implementation you'd validate the token
         # For now, return a mock user
         return TokenData(user_id="mock_user", org_id="mock_org")

@@ -6,8 +6,9 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+from datetime import datetime
 
-from src.api.v1 import auth, kb, query, upload
+from src.api.v1 import auth, kb, query, upload, apikeys
 from src.core.database import supabase
 
 # Configure logging
@@ -57,31 +58,74 @@ app.add_middleware(
 )
 
 
-# Dependency to get current user
+# Dependency to get current user (supports both JWT and API keys)
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> TokenData:
-    """Extract and validate user from JWT token."""
+    """Extract and validate user from JWT token or API key."""
     try:
-        # Verify token with Supabase
-        response = supabase.auth.get_user(credentials.credentials)
-        user = response.user
+        token = credentials.credentials if credentials else None
 
-        if not user:
+        if not token:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token"
+                detail="Authentication required"
             )
 
-        # Get org_id from users table
-        user_data = supabase.table("users").select("org_id").eq("id", user.id).single().execute()
-        org_id = user_data.data.get("org_id") if user_data.data else None
+        # Check if it's an API key (starts with "kb_")
+        if token.startswith("kb_"):
+            # Validate API key
+            import hashlib
+            key_hash = hashlib.sha256(token.encode()).hexdigest()
 
-        return TokenData(user_id=user.id, org_id=org_id)
+            key_data = supabase.table("api_keys").select("org_id, permissions, is_active, expires_at").eq("key_hash", key_hash).single().execute()
 
+            if not key_data.data:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid API key"
+                )
+
+            key_info = key_data.data
+            if not key_info["is_active"]:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="API key is disabled"
+                )
+
+            if key_info["expires_at"] and datetime.fromisoformat(key_info["expires_at"].replace('Z', '+00:00')) < datetime.utcnow():
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="API key has expired"
+                )
+
+            # Update last_used_at
+            supabase.table("api_keys").update({"last_used_at": "now"}).eq("key_hash", key_hash).execute()
+
+            return TokenData(user_id="api_key_user", org_id=key_info["org_id"])
+
+        else:
+            # Validate JWT token with Supabase
+            response = supabase.auth.get_user(token)
+            user = response.user
+
+            if not user:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid token"
+                )
+
+            # Get org_id from users table
+            user_data = supabase.table("users").select("org_id").eq("id", user.id).single().execute()
+            org_id = user_data.data.get("org_id") if user_data.data else None
+
+            return TokenData(user_id=user.id, org_id=org_id)
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Token validation error: {e}")
+        logger.error(f"Authentication error: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token validation failed"
+            detail="Authentication failed"
         )
 
 
@@ -123,9 +167,11 @@ async def root() -> dict:
 
 # Include API route modules
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
+app.include_router(auth.router, prefix="", tags=["Authentication"])  # Also mount at root for /auth/callback
 app.include_router(kb.router, prefix="/api/v1", tags=["Knowledge Bases"])
 app.include_router(upload.router, prefix="/api/v1", tags=["Uploads"])
 app.include_router(query.router, prefix="/api/v1", tags=["Querying"])
+app.include_router(apikeys.router, prefix="/api/v1", tags=["API Keys"])
 
 
 if __name__ == "__main__":

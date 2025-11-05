@@ -1,0 +1,849 @@
+{
+  "info": {
+    "name": "Knowledge Base AI API",
+    "description": "Complete API collection for the Knowledge Base AI system with ETL pipeline",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "access_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "api_key",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "org_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "kb_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "user_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "api_key_id",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health Check",
+      "item": [
+        {
+          "name": "Get Health Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": ["{{base_url}}"],
+              "path": ["health"]
+            },
+            "description": "Check if the API is running and healthy"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "Sign Up",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"testuser@example.com\",\n  \"password\": \"testpassword123\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/auth/signup",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "auth", "signup"]
+            },
+            "description": "Create a new user account"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const response = pm.response.json();",
+                  "    pm.collectionVariables.set('user_id', response.user.id);",
+                  "    console.log('User created with ID:', response.user.id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Sign In",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"testuser@example.com\",\n  \"password\": \"testpassword123\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/auth/signin",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "auth", "signin"]
+            },
+            "description": "Sign in with existing credentials"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const response = pm.response.json();",
+                  "    pm.collectionVariables.set('access_token', response.access_token);",
+                  "    console.log('Access token set:', response.access_token);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get User Info",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/auth/me?access_token={{access_token}}",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "me"],
+              "query": [
+                {
+                  "key": "access_token",
+                  "value": "{{access_token}}"
+                }
+              ]
+            },
+            "description": "Get current user information"
+          }
+        },
+        {
+          "name": "OAuth Sign In - Google",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"google\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/auth/oauth/signin",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "auth", "oauth", "signin"]
+            },
+            "description": "Get Google OAuth sign-in URL"
+          }
+        },
+        {
+          "name": "OAuth Sign In - GitHub",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"github\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/auth/oauth/signin",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "auth", "oauth", "signin"]
+            },
+            "description": "Get GitHub OAuth sign-in URL"
+          }
+        },
+        {
+          "name": "OAuth Callback (GET)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/auth/callback?code=oauth_authorization_code_here",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "callback"],
+              "query": [
+                {
+                  "key": "code",
+                  "value": "oauth_authorization_code_here",
+                  "description": "The authorization code from OAuth provider"
+                }
+              ]
+            },
+            "description": "Handle OAuth callback with authorization code (GET method - what browsers use)"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const response = pm.response.json();",
+                  "    pm.collectionVariables.set('access_token', response.access_token);",
+                  "    pm.collectionVariables.set('user_id', response.user.id);",
+                  "    console.log('OAuth login successful, token set');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "OAuth Callback (POST)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"oauth_authorization_code_here\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/callback",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "callback"]
+            },
+            "description": "Handle OAuth callback with authorization code (POST method for compatibility)"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const response = pm.response.json();",
+                  "    pm.collectionVariables.set('access_token', response.access_token);",
+                  "    pm.collectionVariables.set('user_id', response.user.id);",
+                  "    console.log('OAuth login successful, token set');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Refresh Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"your_refresh_token_here\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/auth/refresh",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "auth", "refresh"]
+            },
+            "description": "Refresh access token using refresh token"
+          }
+        },
+        {
+          "name": "Sign Out",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"your_refresh_token_here\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/auth/signout",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "auth", "signout"]
+            },
+            "description": "Sign out user"
+          }
+        },
+        {
+          "name": "Get User by Token",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/auth/auth/user?access_token={{access_token}}",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "auth", "user"],
+              "query": [
+                {
+                  "key": "access_token",
+                  "value": "{{access_token}}"
+                }
+              ]
+            },
+            "description": "Get user information using access token"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Organizations",
+      "item": [
+        {
+          "name": "Create Organization",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Test Organization\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/orgs",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "orgs"]
+            },
+            "description": "Create a new organization"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const response = pm.response.json();",
+                  "    pm.collectionVariables.set('org_id', response.id);",
+                  "    console.log('Organization created with ID:', response.id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Add User to Organization",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"testuser@example.com\",\n  \"role\": \"admin\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/orgs/{{org_id}}/users",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "orgs", "{{org_id}}", "users"]
+            },
+            "description": "Add a user to an organization"
+          }
+        },
+        {
+          "name": "List Organization Users",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/auth/orgs/{{org_id}}/users",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "orgs", "{{org_id}}", "users"]
+            },
+            "description": "List all users in an organization"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Knowledge Bases",
+      "item": [
+        {
+          "name": "Create Knowledge Base",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Test Knowledge Base\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/orgs/{{org_id}}/kbs",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "orgs", "{{org_id}}", "kbs"]
+            },
+            "description": "Create a new knowledge base in an organization"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const response = pm.response.json();",
+                  "    pm.collectionVariables.set('kb_id', response.id);",
+                  "    console.log('Knowledge Base created with ID:', response.id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Knowledge Bases",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/orgs/{{org_id}}/kbs",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "orgs", "{{org_id}}", "kbs"]
+            },
+            "description": "List all knowledge bases in an organization"
+          }
+        },
+        {
+          "name": "Get Knowledge Base",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/kbs/{{kb_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "kbs", "{{kb_id}}"]
+            },
+            "description": "Get details of a specific knowledge base"
+          }
+        }
+      ]
+    },
+    {
+      "name": "File Upload & Processing",
+      "item": [
+        {
+          "name": "Upload Files and URLs",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "files",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "urls",
+                  "value": "https://example.com/document.pdf",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/kbs/{{kb_id}}/upload",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "kbs", "{{kb_id}}", "upload"]
+            },
+            "description": "Upload files and URLs to a knowledge base for processing"
+          }
+        },
+        {
+          "name": "Check Upload Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/upload/status/{{batch_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "upload", "status", "{{batch_id}}"]
+            },
+            "description": "Check the status of an upload batch"
+          }
+        },
+        {
+          "name": "List Knowledge Base Files",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/kbs/{{kb_id}}/files",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "kbs", "{{kb_id}}", "files"]
+            },
+            "description": "List all files in a knowledge base"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Query & AI Responses",
+      "item": [
+        {
+          "name": "Query Knowledge Base",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"What is machine learning?\",\n  \"kb_id\": \"{{kb_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/query",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "query"]
+            },
+            "description": "Query the knowledge base with AI-powered responses"
+          }
+        },
+        {
+          "name": "List Conversations",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/conversations",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "conversations"]
+            },
+            "description": "List user's conversation history"
+          }
+        },
+        {
+          "name": "Resolve Conversation",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"satisfaction_score\": 5\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/conversations/{{conv_id}}/resolve",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "conversations", "{{conv_id}}", "resolve"]
+            },
+            "description": "Mark a conversation as resolved"
+          }
+        }
+      ]
+    },
+    {
+      "name": "API Keys Management",
+      "item": [
+        {
+          "name": "Create API Key",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"My API Key\",\n  \"permissions\": {\n    \"read\": true,\n    \"write\": true,\n    \"admin\": false\n  },\n  \"expires_in_days\": 365\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/apikeys",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "apikeys"]
+            },
+            "description": "Create a new API key for system-to-system authentication"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const response = pm.response.json();",
+                  "    pm.collectionVariables.set('api_key', response.key);",
+                  "    console.log('API Key created:', response.key);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List API Keys",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/apikeys",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "apikeys"]
+            },
+            "description": "List all API keys for the organization"
+          }
+        },
+        {
+          "name": "Delete API Key",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/apikeys/{{api_key_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "apikeys", "{{api_key_id}}"]
+            },
+            "description": "Delete an API key"
+          }
+        },
+        {
+          "name": "Toggle API Key",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/apikeys/{{api_key_id}}/toggle",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "apikeys", "{{api_key_id}}", "toggle"]
+            },
+            "description": "Enable/disable an API key"
+          }
+        }
+      ]
+    },
+    {
+      "name": "System-to-System API Calls",
+      "item": [
+        {
+          "name": "Query with API Key",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{api_key}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"What is machine learning?\",\n  \"kb_id\": \"{{kb_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/query",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "query"]
+            },
+            "description": "Query knowledge base using API key authentication (system-to-system)"
+          }
+        },
+        {
+          "name": "List KBs with API Key",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{api_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/orgs/{{org_id}}/kbs",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "orgs", "{{org_id}}", "kbs"]
+            },
+            "description": "List knowledge bases using API key authentication"
+          }
+        },
+        {
+          "name": "Upload Files with API Key",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{api_key}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "files",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "urls",
+                  "value": "https://example.com/document.pdf",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/kbs/{{kb_id}}/upload",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "kbs", "{{kb_id}}", "upload"]
+            },
+            "description": "Upload files using API key authentication"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Metrics & Analytics",
+      "item": [
+        {
+          "name": "Get Organization Metrics",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/orgs/{{org_id}}/metrics",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "orgs", "{{org_id}}", "metrics"]
+            },
+            "description": "Get analytics and metrics for an organization"
+          }
+        }
+      ]
+    }
+  ]
+}

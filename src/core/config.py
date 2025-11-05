@@ -33,6 +33,7 @@ class Settings:
     GOOGLE_REDIRECT_URL: str = os.getenv("GOOGLE_REDIRECT_URL", "http://localhost:3000/auth/callback")
     GITHUB_REDIRECT_URL: str = os.getenv("GITHUB_REDIRECT_URL", "http://localhost:3000/auth/callback")
 
+
     def __init__(self) -> None:
         """Validate required settings on initialization."""
         if not self.SUPABASE_URL or not self.SUPABASE_ANON_KEY:
