@@ -10,6 +10,12 @@ EXCEPTION
 END $$;
 
 DO $$ BEGIN
+    CREATE TYPE app_role AS ENUM ('admin', 'member');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
     CREATE TYPE conversation_status AS ENUM ('ongoing', 'resolved_ai', 'resolved_human', 'escalated');
 EXCEPTION
     WHEN duplicate_object THEN null;
@@ -25,6 +31,8 @@ END $$;
 CREATE TABLE IF NOT EXISTS organizations (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name TEXT NOT NULL,
+    description TEXT,
+    team_size INTEGER,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -32,7 +40,10 @@ CREATE TABLE IF NOT EXISTS organizations (
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
     org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    role user_role DEFAULT 'member',
+    role app_role DEFAULT 'member',
+    email TEXT,
+    first_name TEXT,
+    last_name TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -82,6 +93,22 @@ CREATE TABLE IF NOT EXISTS messages (
     timestamp TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS user_roles (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role user_role NOT NULL,
+    UNIQUE(user_id, role)
+);
+
+CREATE TABLE IF NOT EXISTS kb (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    content TEXT NOT NULL,
+    metadata JSONB DEFAULT '{}',
+    embedding VECTOR(384),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS api_keys (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -120,6 +147,7 @@ CREATE INDEX IF NOT EXISTS idx_metrics_conv_id ON metrics(conv_id);
 CREATE INDEX IF NOT EXISTS idx_api_keys_org_id ON api_keys(org_id);
 CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash);
 CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(is_active) WHERE is_active = true;
+CREATE INDEX IF NOT EXISTS idx_kb_embedding ON kb USING ivfflat (embedding vector_cosine_ops);
 
 -- RPC function for vector similarity search
 CREATE OR REPLACE FUNCTION match_documents(
@@ -217,4 +245,7 @@ END;
 $$ language 'plpgsql';
 
 CREATE TRIGGER update_organizations_updated_at BEFORE UPDATE ON organizations
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_kb_updated_at BEFORE UPDATE ON kb
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

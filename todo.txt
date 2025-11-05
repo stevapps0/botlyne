@@ -1,0 +1,27 @@
+Perfect! Since the user has already created an account and organization, and has an API key sk-RTcxfT582oGQlTWpHgNc5tAdA9WeLU6d, the simplified user journey for file upload and querying is:
+
+Current User Journey (Account & Org Already Created)
+1. Create Knowledge Base
+POST /api/v1/orgs/{org_id}/kbs with {"name": "My KB"}
+Returns KB ID
+2. Upload Files/PDFs (ETL Pipeline)
+POST /api/v1/kbs/{kb_id}/upload
+FormData: files (multiple files) + urls (optional)
+Returns batch_id
+3. Check Upload Status
+GET /api/v1/upload/status/{batch_id}
+Poll until status: "completed"
+4. Query the Knowledge Base
+POST /api/v1/query with {"query": "question", "kb_id": "{kb_id}"}
+Returns AI answer with sources
+5. View Conversations
+GET /api/v1/conversations - See chat history
+All requests use: Authorization: Bearer sk-RTcxfT582oGQlTWpHgNc5tAdA9WeLU6d
+
+The ETL pipeline will automatically:
+
+Extract text from PDFs/files
+Chunk content
+Generate embeddings
+Store in vector database
+Enable semantic search for queries

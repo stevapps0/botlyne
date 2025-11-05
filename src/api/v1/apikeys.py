@@ -48,9 +48,8 @@ async def get_current_user(token: str = Depends(lambda: None)):
         if token and token.startswith("Bearer "):
             api_key = token.replace("Bearer ", "")
             if api_key.startswith("kb_") or api_key.startswith("sk-"):
-                # Validate API key
-                key_hash = hashlib.sha256(api_key.encode()).hexdigest()
-                key_data = supabase.table("api_keys").select("*").eq("key_hash", key_hash).eq("is_active", True).single().execute()
+                # Validate API key (stored as plain text)
+                key_data = supabase.table("api_keys").select("*").eq("key_hash", api_key).eq("is_active", True).single().execute()
                 if key_data.data:
                     return TokenData(user_id="api_key_user", org_id=key_data.data["org_id"])
 

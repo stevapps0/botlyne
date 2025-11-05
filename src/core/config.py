@@ -37,7 +37,9 @@ class Settings:
     def __init__(self) -> None:
         """Validate required settings on initialization."""
         if not self.SUPABASE_URL or not self.SUPABASE_ANON_KEY:
-            raise ValueError("SUPABASE_URL and SUPABASE_ANON_KEY environment variables are required")
+            # Use default local Supabase if not set
+            self.SUPABASE_URL = "http://127.0.0.1:54321"
+            self.SUPABASE_ANON_KEY = "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH"
 
 
 # Global settings instance

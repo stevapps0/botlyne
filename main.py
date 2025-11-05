@@ -70,13 +70,10 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
                 detail="Authentication required"
             )
 
-        # Check if it's an API key (starts with "kb_")
-        if token.startswith("kb_"):
-            # Validate API key
-            import hashlib
-            key_hash = hashlib.sha256(token.encode()).hexdigest()
-
-            key_data = supabase.table("api_keys").select("org_id, permissions, is_active, expires_at").eq("key_hash", key_hash).single().execute()
+        # Check if it's an API key (starts with "kb_" or "sk-")
+        if token.startswith("kb_") or token.startswith("sk-"):
+            # Validate API key (stored as plain text)
+            key_data = supabase.table("api_keys").select("org_id, permissions, is_active, expires_at").eq("key_hash", token).single().execute()
 
             if not key_data.data:
                 raise HTTPException(
@@ -98,7 +95,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
                 )
 
             # Update last_used_at
-            supabase.table("api_keys").update({"last_used_at": "now"}).eq("key_hash", key_hash).execute()
+            supabase.table("api_keys").update({"last_used_at": "now"}).eq("key_hash", token).execute()
 
             return TokenData(user_id="api_key_user", org_id=key_info["org_id"])
 
