@@ -12,6 +12,7 @@ from src.core.database import supabase as main_supabase
 class TokenData(BaseModel):
     user_id: str
     org_id: str | None = None
+    kb_id: str | None = None
 
 # Dependency to get current user
 async def get_current_user(token: str = Depends(lambda: None)):
@@ -20,11 +21,15 @@ async def get_current_user(token: str = Depends(lambda: None)):
         # Check for org API key
         if token and token.startswith("Bearer "):
             api_key = token.replace("Bearer ", "")
-            if api_key.startswith("kb_") or api_key.startswith("sk-"):
-                # Validate API key (stored as plain text)
-                key_data = supabase.table("api_keys").select("*").eq("key_hash", api_key).eq("is_active", True).single().execute()
+            if api_key.startswith("sk-"):
+                # Validate API key and get associated KB
+                key_data = supabase.table("api_keys").select("org_id, kb_id").eq("key_hash", api_key).eq("is_active", True).single().execute()
                 if key_data.data:
-                    return TokenData(user_id="api_key_user", org_id=key_data.data["org_id"])
+                    return TokenData(
+                        user_id="api_key_user",
+                        org_id=key_data.data["org_id"],
+                        kb_id=key_data.data.get("kb_id")
+                    )
                 else:
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -42,16 +47,16 @@ async def get_current_user(token: str = Depends(lambda: None)):
             # Get user org from database
             user_data = supabase.table("users").select("org_id").eq("id", user_id).single().execute()
             org_id = user_data.data.get("org_id") if user_data.data else None
-            return TokenData(user_id=user_id, org_id=org_id)
+            return TokenData(user_id=user_id, org_id=org_id, kb_id="mock_kb")
         elif token and token.startswith("mock-token-"):
             # Handle query parameter style tokens
             user_id = token.replace("mock-token-", "")
             user_data = supabase.table("users").select("org_id").eq("id", user_id).single().execute()
             org_id = user_data.data.get("org_id") if user_data.data else None
-            return TokenData(user_id=user_id, org_id=org_id)
+            return TokenData(user_id=user_id, org_id=org_id, kb_id="mock_kb")
         else:
             # This is a simplified version - in real implementation you'd validate the token
-            return TokenData(user_id="mock_user", org_id="mock_org")
+            return TokenData(user_id="mock_user", org_id="mock_org", kb_id="mock_kb")
     except HTTPException:
         raise
     except Exception as e:
@@ -68,9 +73,17 @@ async def require_admin(current_user: TokenData = Depends(get_current_user)) -> 
 
 router = APIRouter()
 
+# Standard API Response Model
+class APIResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[dict] = None
+    error: Optional[str] = None
+
 # Pydantic models
 class CreateKBRequest(BaseModel):
     name: str
+    shortcode: str
 
 class KBResponse(BaseModel):
     id: str
@@ -85,14 +98,20 @@ class KBListResponse(BaseModel):
     document_count: int = 0
 
 # Knowledge Base CRUD endpoints
-@router.post("/orgs/{org_id}/kbs", response_model=KBResponse)
+@router.post("/kb", response_model=APIResponse)
 async def create_knowledge_base(
-    org_id: str,
     data: CreateKBRequest,
     current_user: TokenData = Depends(get_current_user)
 ):
     """Create a new knowledge base in an organization"""
     try:
+        # Get org_id from shortcode
+        org_result = supabase.table("organizations").select("id").eq("org_id_shortcode", data.shortcode).single().execute()
+        if not org_result.data:
+            raise HTTPException(status_code=404, detail="Organization not found")
+
+        org_id = org_result.data["id"]
+
         # Verify user belongs to org
         if current_user.org_id != org_id:
             raise HTTPException(status_code=403, detail="Access denied")
@@ -105,72 +124,88 @@ async def create_knowledge_base(
         result = supabase.table("knowledge_bases").insert(kb_data).execute()
         kb = result.data[0]
 
-        return KBResponse(**kb)
+        # Update API key with KB association (assuming single KB per API key for simplicity)
+        supabase.table("api_keys").update({"kb_id": kb["id"]}).eq("org_id", org_id).execute()
+
+        return APIResponse(
+            success=True,
+            message="Knowledge base created successfully",
+            data={"kb": KBResponse(**kb).dict()}
+        )
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to create knowledge base: {str(e)}"
+        return APIResponse(
+            success=False,
+            message="Failed to create knowledge base",
+            error=str(e)
         )
 
-@router.get("/orgs/{org_id}/kbs", response_model=List[KBListResponse])
-async def list_knowledge_bases(
-    org_id: str,
-    current_user: TokenData = Depends(get_current_user)
-):
-    """List all knowledge bases in an organization"""
-    try:
-        # Verify user belongs to org
-        if current_user.org_id != org_id:
-            raise HTTPException(status_code=403, detail="Access denied")
+class ListKBRequest(BaseModel):
+    org_id: str
 
+@router.get("/kb", response_model=APIResponse)
+async def list_knowledge_bases(current_user: TokenData = Depends(get_current_user)):
+    """List all knowledge bases in the user's organization"""
+    try:
         # Get KBs with document count
         result = supabase.table("knowledge_bases").select("""
             id,
             name,
             created_at
-        """).eq("org_id", org_id).execute()
+        """).eq("org_id", current_user.org_id).execute()
 
         kbs = []
         for kb in result.data:
             # Count documents
             doc_count = supabase.table("documents").select("id", count="exact").eq("kb_id", kb["id"]).execute()
             kb["document_count"] = doc_count.count
-            kbs.append(KBListResponse(**kb))
+            kbs.append(KBListResponse(**kb).dict())
 
-        return kbs
-    except HTTPException:
-        raise
+        return APIResponse(
+            success=True,
+            message="Knowledge bases retrieved successfully",
+            data={"kbs": kbs}
+        )
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to list knowledge bases: {str(e)}"
+        return APIResponse(
+            success=False,
+            message="Failed to list knowledge bases",
+            error=str(e)
         )
 
-@router.get("/kbs/{kb_id}", response_model=KBResponse)
-async def get_knowledge_base(
-    kb_id: str,
-    current_user: TokenData = Depends(get_current_user)
-):
-    """Get knowledge base details"""
+class GetKBRequest(BaseModel):
+    kb_id: str
+
+@router.get("/kb/current", response_model=APIResponse)
+async def get_current_knowledge_base(current_user: TokenData = Depends(get_current_user)):
+    """Get the user's associated knowledge base details"""
     try:
-        # Get KB and verify access
-        result = supabase.table("knowledge_bases").select("*").eq("id", kb_id).single().execute()
+        if not current_user.kb_id:
+            return APIResponse(
+                success=False,
+                message="No knowledge base associated with this API key",
+                error="kb_not_found"
+            )
+
+        # Get KB details
+        result = supabase.table("knowledge_bases").select("*").eq("id", current_user.kb_id).single().execute()
         if not result.data:
             raise HTTPException(status_code=404, detail="Knowledge base not found")
 
         kb = result.data
-        if kb["org_id"] != current_user.org_id:
-            raise HTTPException(status_code=403, detail="Access denied")
-
-        return KBResponse(**kb)
+        return APIResponse(
+            success=True,
+            message="Knowledge base retrieved successfully",
+            data={"kb": KBResponse(**kb).dict()}
+        )
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to get knowledge base: {str(e)}"
+        return APIResponse(
+            success=False,
+            message="Failed to get knowledge base",
+            error=str(e)
         )
 
 @router.put("/kbs/{kb_id}", response_model=KBResponse)

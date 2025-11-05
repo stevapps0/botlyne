@@ -1,168 +1,174 @@
--- Enable necessary extensions
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE EXTENSION IF NOT EXISTS "vector";
 
--- Custom types (with IF NOT EXISTS to avoid conflicts)
-DO $$ BEGIN
-    CREATE TYPE user_role AS ENUM ('admin', 'member');
-EXCEPTION
-    WHEN duplicate_object THEN null;
-END $$;
 
-DO $$ BEGIN
-    CREATE TYPE app_role AS ENUM ('admin', 'member');
-EXCEPTION
-    WHEN duplicate_object THEN null;
-END $$;
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
 
-DO $$ BEGIN
-    CREATE TYPE conversation_status AS ENUM ('ongoing', 'resolved_ai', 'resolved_human', 'escalated');
-EXCEPTION
-    WHEN duplicate_object THEN null;
-END $$;
 
-DO $$ BEGIN
-    CREATE TYPE message_sender AS ENUM ('user', 'ai');
-EXCEPTION
-    WHEN duplicate_object THEN null;
-END $$;
+COMMENT ON SCHEMA "public" IS 'standard public schema';
 
--- Create tables (with IF NOT EXISTS to avoid conflicts)
-CREATE TABLE IF NOT EXISTS organizations (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    name TEXT NOT NULL,
-    description TEXT,
-    team_size INTEGER,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+
+
+CREATE EXTENSION IF NOT EXISTS "pg_graphql" WITH SCHEMA "graphql";
+
+
+
+
+
+
+CREATE EXTENSION IF NOT EXISTS "pg_stat_statements" WITH SCHEMA "extensions";
+
+
+
+
+
+
+CREATE EXTENSION IF NOT EXISTS "pgcrypto" WITH SCHEMA "extensions";
+
+
+
+
+
+
+CREATE EXTENSION IF NOT EXISTS "supabase_vault" WITH SCHEMA "vault";
+
+
+
+
+
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "extensions";
+
+
+
+
+
+
+CREATE EXTENSION IF NOT EXISTS "vector" WITH SCHEMA "extensions";
+
+
+
+
+
+
+CREATE TYPE "public"."app_role" AS ENUM (
+    'admin',
+    'member'
 );
 
-CREATE TABLE IF NOT EXISTS users (
-    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
-    org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    role app_role DEFAULT 'member',
-    email TEXT,
-    first_name TEXT,
-    last_name TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+
+ALTER TYPE "public"."app_role" OWNER TO "postgres";
+
+
+CREATE TYPE "public"."conversation_status" AS ENUM (
+    'ongoing',
+    'resolved_ai',
+    'resolved_human',
+    'escalated'
 );
 
-CREATE TABLE IF NOT EXISTS knowledge_bases (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+
+ALTER TYPE "public"."conversation_status" OWNER TO "postgres";
+
+
+CREATE TYPE "public"."message_sender" AS ENUM (
+    'user',
+    'ai'
 );
 
-CREATE TABLE IF NOT EXISTS files (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    kb_id UUID NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
-    filename TEXT NOT NULL,
-    file_path TEXT, -- Supabase Storage path for uploaded files
-    url TEXT, -- For URLs
-    file_type TEXT NOT NULL, -- e.g., 'pdf', 'docx', 'url'
-    size_bytes BIGINT,
-    uploaded_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    uploaded_at TIMESTAMPTZ DEFAULT NOW()
+
+ALTER TYPE "public"."message_sender" OWNER TO "postgres";
+
+
+CREATE TYPE "public"."user_role" AS ENUM (
+    'admin',
+    'member'
 );
 
-CREATE TABLE IF NOT EXISTS documents (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    kb_id UUID NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
-    file_id UUID REFERENCES files(id) ON DELETE SET NULL, -- Link to source file/URL
-    content TEXT NOT NULL,
-    embedding VECTOR(384), -- Adjust dimension based on your model (384 for all-MiniLM-L6-v2)
-    metadata JSONB DEFAULT '{}',
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
 
-CREATE TABLE IF NOT EXISTS conversations (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    kb_id UUID NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
-    status conversation_status DEFAULT 'ongoing',
-    started_at TIMESTAMPTZ DEFAULT NOW(),
-    resolved_at TIMESTAMPTZ
-);
+ALTER TYPE "public"."user_role" OWNER TO "postgres";
 
-CREATE TABLE IF NOT EXISTS messages (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    conv_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    sender message_sender NOT NULL,
-    content TEXT NOT NULL,
-    timestamp TIMESTAMPTZ DEFAULT NOW()
-);
 
-CREATE TABLE IF NOT EXISTS user_roles (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role user_role NOT NULL,
-    UNIQUE(user_id, role)
-);
+CREATE OR REPLACE FUNCTION "public"."cleanup_expired_otps"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+BEGIN
+    DELETE FROM public.otps
+    WHERE expires_at < CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$;
 
-CREATE TABLE IF NOT EXISTS kb (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    content TEXT NOT NULL,
-    metadata JSONB DEFAULT '{}',
-    embedding VECTOR(384),
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
 
-CREATE TABLE IF NOT EXISTS api_keys (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    key_hash TEXT NOT NULL UNIQUE,
-    permissions JSONB DEFAULT '{"read": true, "write": true, "admin": false}',
-    created_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    last_used_at TIMESTAMPTZ,
-    expires_at TIMESTAMPTZ,
-    is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
+ALTER FUNCTION "public"."cleanup_expired_otps"() OWNER TO "postgres";
 
-CREATE TABLE IF NOT EXISTS metrics (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    conv_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE UNIQUE,
-    response_time FLOAT,
-    resolution_time FLOAT,
-    satisfaction_score INTEGER CHECK (satisfaction_score >= 1 AND satisfaction_score <= 5),
-    ai_responses INTEGER DEFAULT 0,
-    handoff_triggered BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
 
--- Indexes for performance (with IF NOT EXISTS)
-CREATE INDEX IF NOT EXISTS idx_users_org_id ON users(org_id);
-CREATE INDEX IF NOT EXISTS idx_knowledge_bases_org_id ON knowledge_bases(org_id);
-CREATE INDEX IF NOT EXISTS idx_files_kb_id ON files(kb_id);
-CREATE INDEX IF NOT EXISTS idx_documents_kb_id ON documents(kb_id);
-CREATE INDEX IF NOT EXISTS idx_documents_file_id ON documents(file_id);
-CREATE INDEX IF NOT EXISTS idx_documents_embedding ON documents USING ivfflat (embedding vector_cosine_ops);
-CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id);
-CREATE INDEX IF NOT EXISTS idx_conversations_kb_id ON conversations(kb_id);
-CREATE INDEX IF NOT EXISTS idx_messages_conv_id ON messages(conv_id);
-CREATE INDEX IF NOT EXISTS idx_metrics_conv_id ON metrics(conv_id);
-CREATE INDEX IF NOT EXISTS idx_api_keys_org_id ON api_keys(org_id);
-CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash);
-CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(is_active) WHERE is_active = true;
-CREATE INDEX IF NOT EXISTS idx_kb_embedding ON kb USING ivfflat (embedding vector_cosine_ops);
+CREATE OR REPLACE FUNCTION "public"."get_user_org_id"("user_id" "uuid") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+BEGIN
+    -- Disable RLS for this query to prevent recursion
+    SET LOCAL row_security = off;
+    RETURN (SELECT org_id FROM users WHERE id = user_id);
+END;
+$$;
 
--- RPC function for vector similarity search
-CREATE OR REPLACE FUNCTION match_documents(
-    query_embedding VECTOR(384),
-    kb_id UUID,
-    match_count INT DEFAULT 5
-)
-RETURNS TABLE(
-    id UUID,
-    content TEXT,
-    metadata JSONB,
-    similarity FLOAT
-)
-LANGUAGE plpgsql
-AS $$
+
+ALTER FUNCTION "public"."get_user_org_id"("user_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."has_role"("_user_id" "uuid", "_role" "public"."app_role") RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.user_roles
+    WHERE user_id = _user_id
+      AND role = _role
+  )
+$$;
+
+
+ALTER FUNCTION "public"."has_role"("_user_id" "uuid", "_role" "public"."app_role") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."match_documents"("query_embedding" "extensions"."vector", "match_count" integer, "filter" "jsonb" DEFAULT '{}'::"jsonb") RETURNS TABLE("id" "uuid", "content" "text", "metadata" "jsonb", "embedding" "extensions"."vector", "similarity" double precision)
+    LANGUAGE "plpgsql"
+    SET "search_path" TO ''
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT
+    kb.id,
+    kb.content,
+    kb.metadata,
+    kb.embedding,
+    (1 - (kb.embedding <=> query_embedding))::float AS similarity
+  FROM public.kb
+  WHERE filter IS NULL OR kb.metadata @> filter
+  ORDER BY kb.embedding <=> query_embedding
+  LIMIT match_count;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."match_documents"("query_embedding" "extensions"."vector", "match_count" integer, "filter" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."match_documents"("query_embedding" "extensions"."vector", "kb_id" "uuid", "match_count" integer DEFAULT 5) RETURNS TABLE("id" "uuid", "content" "text", "metadata" "jsonb", "similarity" double precision)
+    LANGUAGE "plpgsql"
+    SET "search_path" TO ''
+    AS $$
 BEGIN
     RETURN QUERY
     SELECT
@@ -177,75 +183,1008 @@ BEGIN
 END;
 $$;
 
--- Function to get org_id for a user (helper for RLS)
-CREATE OR REPLACE FUNCTION get_user_org_id(user_id UUID)
-RETURNS UUID
-LANGUAGE plpgsql
-AS $$
+
+ALTER FUNCTION "public"."match_documents"("query_embedding" "extensions"."vector", "kb_id" "uuid", "match_count" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."reset_messages_if_new_day"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
 BEGIN
-    RETURN (SELECT org_id FROM users WHERE id = user_id);
+    -- Check if the date has changed implying a new day has started
+    IF NEW.date != OLD.date THEN
+        NEW.messages_sent = 0;
+    END IF;
+    RETURN NEW;
 END;
 $$;
 
--- Enable Row Level Security
-ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE users ENABLE ROW LEVEL SECURITY;
-ALTER TABLE knowledge_bases ENABLE ROW LEVEL SECURITY;
-ALTER TABLE files ENABLE ROW LEVEL SECURITY;
-ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
-ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
-ALTER TABLE metrics ENABLE ROW LEVEL SECURITY;
-ALTER TABLE api_keys ENABLE ROW LEVEL SECURITY;
 
--- Row Level Security Policies
--- Organizations: Users can only see their own org
-CREATE POLICY "org_select_policy" ON organizations
-    FOR SELECT USING (id = get_user_org_id(auth.uid()));
+ALTER FUNCTION "public"."reset_messages_if_new_day"() OWNER TO "postgres";
 
--- Users: Users can view members of their org
-CREATE POLICY "users_select_policy" ON users
-    FOR SELECT USING (org_id = get_user_org_id(auth.uid()));
 
--- Knowledge bases: Users can access KBs in their org
-CREATE POLICY "kb_all_policy" ON knowledge_bases
-    FOR ALL USING (org_id = get_user_org_id(auth.uid()));
+CREATE OR REPLACE FUNCTION "public"."security_health_check"() RETURNS TABLE("table_name" "text", "issue_type" "text", "description" "text", "severity" "text")
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+BEGIN
+  -- Check for tables without RLS
+  RETURN QUERY
+  SELECT 
+    t.tablename::text,
+    'Missing RLS'::text,
+    'Table does not have Row Level Security enabled'::text,
+    'HIGH'::text
+  FROM pg_tables t
+  LEFT JOIN pg_class c ON c.relname = t.tablename
+  WHERE t.schemaname = 'public' 
+    AND NOT c.relrowsecurity
+    AND t.tablename NOT LIKE 'pg_%';
+    
+  -- Check for overly permissive policies
+  RETURN QUERY
+  SELECT 
+    p.tablename::text,
+    'Permissive Policy'::text,
+    ('Policy "' || p.policyname || '" allows: ' || p.cmd)::text,
+    'MEDIUM'::text
+  FROM pg_policies p
+  WHERE p.schemaname = 'public' 
+    AND p.qual = 'true'
+    AND p.cmd = 'SELECT';
+END;
+$$;
 
--- Files: Access via KB
-CREATE POLICY "files_all_policy" ON files
-    FOR ALL USING (kb_id IN (SELECT id FROM knowledge_bases WHERE org_id = get_user_org_id(auth.uid())));
 
--- Documents: Access via KB
-CREATE POLICY "documents_all_policy" ON documents
-    FOR ALL USING (kb_id IN (SELECT id FROM knowledge_bases WHERE org_id = get_user_org_id(auth.uid())));
+ALTER FUNCTION "public"."security_health_check"() OWNER TO "postgres";
 
--- Conversations: Users can access their own conversations
-CREATE POLICY "conversations_all_policy" ON conversations
-    FOR ALL USING (user_id = auth.uid());
 
--- Messages: Access via conversation
-CREATE POLICY "messages_all_policy" ON messages
-    FOR ALL USING (conv_id IN (SELECT id FROM conversations WHERE user_id = auth.uid()));
+COMMENT ON FUNCTION "public"."security_health_check"() IS 'Monitors database for common security misconfigurations';
 
--- Metrics: Access via conversation
-CREATE POLICY "metrics_all_policy" ON metrics
-    FOR ALL USING (conv_id IN (SELECT id FROM conversations WHERE user_id = auth.uid()));
 
--- API Keys: Organization admins can manage their org's API keys
-CREATE POLICY "api_keys_all_policy" ON api_keys
-    FOR ALL USING (org_id = get_user_org_id(auth.uid()));
 
--- Triggers for updated_at
-CREATE OR REPLACE FUNCTION update_updated_at_column()
-RETURNS TRIGGER AS $$
+CREATE OR REPLACE FUNCTION "public"."set_expiry"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+BEGIN
+  -- Always set expires_at to 3 minutes after created_at
+  NEW.expires_at := NEW.created_at + interval '3 minutes';
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."set_expiry"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."set_otp_expires_at"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+BEGIN
+  NEW.expires_at := NEW.created_at + INTERVAL '5 minutes';
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."set_otp_expires_at"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."update_updated_at_column"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO ''
+    AS $$
 BEGIN
     NEW.updated_at = NOW();
     RETURN NEW;
 END;
-$$ language 'plpgsql';
+$$;
 
-CREATE TRIGGER update_organizations_updated_at BEFORE UPDATE ON organizations
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
-CREATE TRIGGER update_kb_updated_at BEFORE UPDATE ON kb
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+ALTER FUNCTION "public"."update_updated_at_column"() OWNER TO "postgres";
+
+SET default_tablespace = '';
+
+SET default_table_access_method = "heap";
+
+
+CREATE TABLE IF NOT EXISTS "public"."api_keys" (
+    "id" "uuid" DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "org_id" "uuid" NOT NULL,
+    "kb_id" "uuid" REFERENCES "public"."knowledge_bases"("id") ON DELETE SET NULL,
+    "name" "text" NOT NULL,
+    "key_hash" "text" NOT NULL,
+    "permissions" "jsonb" DEFAULT '{"read": true, "admin": false, "write": true}'::"jsonb",
+    "created_by" "uuid" NOT NULL,
+    "last_used_at" timestamp with time zone,
+    "expires_at" timestamp with time zone,
+    "is_active" boolean DEFAULT true,
+    "created_at" timestamp with time zone DEFAULT "now"()
+);
+
+
+ALTER TABLE "public"."api_keys" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."conversations" (
+    "id" "uuid" DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "user_id" "uuid" NOT NULL,
+    "kb_id" "uuid" NOT NULL,
+    "status" "public"."conversation_status" DEFAULT 'ongoing'::"public"."conversation_status",
+    "started_at" timestamp with time zone DEFAULT "now"(),
+    "resolved_at" timestamp with time zone
+);
+
+
+ALTER TABLE "public"."conversations" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."documents" (
+    "id" "uuid" DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "kb_id" "uuid" NOT NULL,
+    "file_id" "uuid",
+    "content" "text" NOT NULL,
+    "embedding" "extensions"."vector"(384),
+    "metadata" "jsonb" DEFAULT '{}'::"jsonb",
+    "created_at" timestamp with time zone DEFAULT "now"()
+);
+
+
+ALTER TABLE "public"."documents" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."files" (
+    "id" "uuid" DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "kb_id" "uuid" NOT NULL,
+    "filename" "text" NOT NULL,
+    "file_path" "text",
+    "url" "text",
+    "file_type" "text" NOT NULL,
+    "size_bytes" bigint,
+    "uploaded_by" "uuid" NOT NULL,
+    "uploaded_at" timestamp with time zone DEFAULT "now"()
+);
+
+
+ALTER TABLE "public"."files" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."instances_duplicate" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "instance_name" "text" NOT NULL,
+    "user_id" "uuid" NOT NULL,
+    "status" character varying(50) NOT NULL,
+    "integration" character varying(255) NOT NULL,
+    "settings" "jsonb" NOT NULL,
+    "connected_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "timestamp" "date" DEFAULT CURRENT_DATE NOT NULL,
+    "messages_sent" integer DEFAULT 0 NOT NULL,
+    "api_key" character varying(255) NOT NULL,
+    "webhook_id" "text",
+    "webhook" "jsonb",
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "deleted_at" timestamp with time zone
+);
+
+
+ALTER TABLE "public"."instances_duplicate" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."instances_duplicate" IS 'This is a duplicate of instances';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."kb" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "content" "text" NOT NULL,
+    "metadata" "jsonb" NOT NULL,
+    "embedding" "extensions"."vector"(768) NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"()
+);
+
+
+ALTER TABLE "public"."kb" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."knowledge_bases" (
+    "id" "uuid" DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "org_id" "uuid" NOT NULL,
+    "name" "text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"()
+);
+
+
+ALTER TABLE "public"."knowledge_bases" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."messages" (
+    "id" "uuid" DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "conv_id" "uuid" NOT NULL,
+    "sender" "public"."message_sender" NOT NULL,
+    "content" "text" NOT NULL,
+    "timestamp" timestamp with time zone DEFAULT "now"()
+);
+
+
+ALTER TABLE "public"."messages" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."metrics" (
+    "id" "uuid" DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "conv_id" "uuid" NOT NULL,
+    "response_time" double precision,
+    "resolution_time" double precision,
+    "satisfaction_score" integer,
+    "ai_responses" integer DEFAULT 0,
+    "handoff_triggered" boolean DEFAULT false,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    CONSTRAINT "metrics_satisfaction_score_check" CHECK ((("satisfaction_score" >= 1) AND ("satisfaction_score" <= 5)))
+);
+
+
+ALTER TABLE "public"."metrics" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."organizations" (
+    "id" "uuid" DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "name" "text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "description" "text",
+    "team_size" integer,
+    "org_id_shortcode" "text" UNIQUE
+);
+
+
+ALTER TABLE "public"."organizations" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."user_roles" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "user_id" "uuid" NOT NULL,
+    "role" "public"."app_role" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"()
+);
+
+
+ALTER TABLE "public"."user_roles" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."users" (
+    "id" "uuid" NOT NULL,
+    "org_id" "uuid",
+    "role" "public"."user_role" DEFAULT 'member'::"public"."user_role",
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "email" "text",
+    "first_name" "text",
+    "last_name" "text"
+);
+
+
+ALTER TABLE "public"."users" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."users_duplicate" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "project_id" character varying(255) NOT NULL,
+    "project_name" character varying(255),
+    "api_key" character varying(255) NOT NULL,
+    "email" character varying(255),
+    "name" character varying(255),
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "deleted_at" timestamp with time zone
+);
+
+
+ALTER TABLE "public"."users_duplicate" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."users_duplicate" IS 'This is a duplicate of users';
+
+
+
+ALTER TABLE ONLY "public"."api_keys"
+    ADD CONSTRAINT "api_keys_key_hash_key" UNIQUE ("key_hash");
+
+
+
+ALTER TABLE ONLY "public"."api_keys"
+    ADD CONSTRAINT "api_keys_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."conversations"
+    ADD CONSTRAINT "conversations_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."documents"
+    ADD CONSTRAINT "documents_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."files"
+    ADD CONSTRAINT "files_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."instances_duplicate"
+    ADD CONSTRAINT "instances_duplicate_instance_id_key" UNIQUE ("instance_name");
+
+
+
+ALTER TABLE ONLY "public"."instances_duplicate"
+    ADD CONSTRAINT "instances_duplicate_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."kb"
+    ADD CONSTRAINT "kb_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."knowledge_bases"
+    ADD CONSTRAINT "knowledge_bases_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."messages"
+    ADD CONSTRAINT "messages_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."metrics"
+    ADD CONSTRAINT "metrics_conv_id_key" UNIQUE ("conv_id");
+
+
+
+ALTER TABLE ONLY "public"."metrics"
+    ADD CONSTRAINT "metrics_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."organizations"
+    ADD CONSTRAINT "organizations_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."user_roles"
+    ADD CONSTRAINT "user_roles_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."user_roles"
+    ADD CONSTRAINT "user_roles_user_id_role_key" UNIQUE ("user_id", "role");
+
+
+
+ALTER TABLE ONLY "public"."users_duplicate"
+    ADD CONSTRAINT "users_duplicate_email_key" UNIQUE ("email");
+
+
+
+ALTER TABLE ONLY "public"."users_duplicate"
+    ADD CONSTRAINT "users_duplicate_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."users_duplicate"
+    ADD CONSTRAINT "users_duplicate_project_id_key" UNIQUE ("project_id");
+
+
+
+ALTER TABLE ONLY "public"."users"
+    ADD CONSTRAINT "users_pkey" PRIMARY KEY ("id");
+
+
+
+CREATE INDEX "idx_api_keys_active" ON "public"."api_keys" USING "btree" ("is_active") WHERE ("is_active" = true);
+
+
+
+CREATE INDEX "idx_api_keys_kb_id" ON "public"."api_keys" USING "btree" ("kb_id");
+
+
+
+CREATE INDEX "idx_api_keys_key_hash" ON "public"."api_keys" USING "btree" ("key_hash");
+
+
+
+CREATE INDEX "idx_api_keys_org_id" ON "public"."api_keys" USING "btree" ("org_id");
+
+
+
+CREATE INDEX "idx_conversations_kb_id" ON "public"."conversations" USING "btree" ("kb_id");
+
+
+
+CREATE INDEX "idx_conversations_user_id" ON "public"."conversations" USING "btree" ("user_id");
+
+
+
+CREATE INDEX "idx_documents_embedding" ON "public"."documents" USING "ivfflat" ("embedding" "extensions"."vector_cosine_ops");
+
+
+
+CREATE INDEX "idx_documents_file_id" ON "public"."documents" USING "btree" ("file_id");
+
+
+
+CREATE INDEX "idx_documents_kb_id" ON "public"."documents" USING "btree" ("kb_id");
+
+
+
+CREATE INDEX "idx_files_kb_id" ON "public"."files" USING "btree" ("kb_id");
+
+
+
+CREATE INDEX "idx_kb_embedding" ON "public"."kb" USING "ivfflat" ("embedding" "extensions"."vector_cosine_ops") WITH ("lists"='100');
+
+
+
+CREATE INDEX "idx_knowledge_bases_org_id" ON "public"."knowledge_bases" USING "btree" ("org_id");
+
+
+
+CREATE INDEX "idx_messages_conv_id" ON "public"."messages" USING "btree" ("conv_id");
+
+
+
+CREATE INDEX "idx_metrics_conv_id" ON "public"."metrics" USING "btree" ("conv_id");
+
+
+
+CREATE INDEX "idx_users_org_id" ON "public"."users" USING "btree" ("org_id");
+
+
+
+CREATE INDEX "instances_duplicate_status_idx" ON "public"."instances_duplicate" USING "btree" ("status");
+
+
+
+CREATE INDEX "instances_duplicate_user_id_idx" ON "public"."instances_duplicate" USING "btree" ("user_id");
+
+
+
+CREATE INDEX "users_duplicate_api_key_idx" ON "public"."users_duplicate" USING "btree" ("api_key");
+
+
+
+CREATE INDEX "users_email_idx" ON "public"."users" USING "btree" ("email");
+
+
+
+CREATE OR REPLACE TRIGGER "update_organizations_updated_at" BEFORE UPDATE ON "public"."organizations" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
+
+
+
+ALTER TABLE ONLY "public"."api_keys"
+    ADD CONSTRAINT "api_keys_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "public"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."api_keys"
+    ADD CONSTRAINT "api_keys_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."conversations"
+    ADD CONSTRAINT "conversations_kb_id_fkey" FOREIGN KEY ("kb_id") REFERENCES "public"."knowledge_bases"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."conversations"
+    ADD CONSTRAINT "conversations_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."documents"
+    ADD CONSTRAINT "documents_file_id_fkey" FOREIGN KEY ("file_id") REFERENCES "public"."files"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."documents"
+    ADD CONSTRAINT "documents_kb_id_fkey" FOREIGN KEY ("kb_id") REFERENCES "public"."knowledge_bases"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."files"
+    ADD CONSTRAINT "files_kb_id_fkey" FOREIGN KEY ("kb_id") REFERENCES "public"."knowledge_bases"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."files"
+    ADD CONSTRAINT "files_uploaded_by_fkey" FOREIGN KEY ("uploaded_by") REFERENCES "public"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."knowledge_bases"
+    ADD CONSTRAINT "knowledge_bases_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."messages"
+    ADD CONSTRAINT "messages_conv_id_fkey" FOREIGN KEY ("conv_id") REFERENCES "public"."conversations"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."metrics"
+    ADD CONSTRAINT "metrics_conv_id_fkey" FOREIGN KEY ("conv_id") REFERENCES "public"."conversations"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."user_roles"
+    ADD CONSTRAINT "user_roles_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."users"
+    ADD CONSTRAINT "users_id_fkey" FOREIGN KEY ("id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."users"
+    ADD CONSTRAINT "users_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE "public"."api_keys" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "api_keys_delete" ON "public"."api_keys" FOR DELETE TO "authenticated" USING (("org_id" IN ( SELECT "users"."org_id"
+   FROM "public"."users"
+  WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+CREATE POLICY "api_keys_insert" ON "public"."api_keys" FOR INSERT TO "authenticated" WITH CHECK (("org_id" IN ( SELECT "users"."org_id"
+   FROM "public"."users"
+  WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+CREATE POLICY "api_keys_select" ON "public"."api_keys" FOR SELECT TO "authenticated" USING (("org_id" IN ( SELECT "users"."org_id"
+   FROM "public"."users"
+  WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+CREATE POLICY "api_keys_update" ON "public"."api_keys" FOR UPDATE TO "authenticated" USING (("org_id" IN ( SELECT "users"."org_id"
+   FROM "public"."users"
+  WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+ALTER TABLE "public"."conversations" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "conversations_delete" ON "public"."conversations" FOR DELETE TO "authenticated" USING (("user_id" = ( SELECT "auth"."uid"() AS "uid")));
+
+
+
+CREATE POLICY "conversations_insert" ON "public"."conversations" FOR INSERT TO "authenticated" WITH CHECK (("user_id" = ( SELECT "auth"."uid"() AS "uid")));
+
+
+
+CREATE POLICY "conversations_select" ON "public"."conversations" FOR SELECT TO "authenticated" USING (("user_id" = ( SELECT "auth"."uid"() AS "uid")));
+
+
+
+CREATE POLICY "conversations_update" ON "public"."conversations" FOR UPDATE TO "authenticated" USING (("user_id" = ( SELECT "auth"."uid"() AS "uid")));
+
+
+
+ALTER TABLE "public"."documents" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "documents_delete" ON "public"."documents" FOR DELETE TO "authenticated" USING (("kb_id" IN ( SELECT "knowledge_bases"."id"
+   FROM "public"."knowledge_bases"
+  WHERE ("knowledge_bases"."org_id" IN ( SELECT "users"."org_id"
+           FROM "public"."users"
+          WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))))));
+
+
+
+CREATE POLICY "documents_insert" ON "public"."documents" FOR INSERT TO "authenticated" WITH CHECK (("kb_id" IN ( SELECT "knowledge_bases"."id"
+   FROM "public"."knowledge_bases"
+  WHERE ("knowledge_bases"."org_id" IN ( SELECT "users"."org_id"
+           FROM "public"."users"
+          WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))))));
+
+
+
+CREATE POLICY "documents_select" ON "public"."documents" FOR SELECT TO "authenticated" USING (("kb_id" IN ( SELECT "knowledge_bases"."id"
+   FROM "public"."knowledge_bases"
+  WHERE ("knowledge_bases"."org_id" IN ( SELECT "users"."org_id"
+           FROM "public"."users"
+          WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))))));
+
+
+
+CREATE POLICY "documents_update" ON "public"."documents" FOR UPDATE TO "authenticated" USING (("kb_id" IN ( SELECT "knowledge_bases"."id"
+   FROM "public"."knowledge_bases"
+  WHERE ("knowledge_bases"."org_id" IN ( SELECT "users"."org_id"
+           FROM "public"."users"
+          WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))))));
+
+
+
+ALTER TABLE "public"."files" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "files_delete" ON "public"."files" FOR DELETE TO "authenticated" USING (("kb_id" IN ( SELECT "knowledge_bases"."id"
+   FROM "public"."knowledge_bases"
+  WHERE ("knowledge_bases"."org_id" IN ( SELECT "users"."org_id"
+           FROM "public"."users"
+          WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))))));
+
+
+
+CREATE POLICY "files_insert" ON "public"."files" FOR INSERT TO "authenticated" WITH CHECK (("kb_id" IN ( SELECT "knowledge_bases"."id"
+   FROM "public"."knowledge_bases"
+  WHERE ("knowledge_bases"."org_id" IN ( SELECT "users"."org_id"
+           FROM "public"."users"
+          WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))))));
+
+
+
+CREATE POLICY "files_select" ON "public"."files" FOR SELECT TO "authenticated" USING (("kb_id" IN ( SELECT "knowledge_bases"."id"
+   FROM "public"."knowledge_bases"
+  WHERE ("knowledge_bases"."org_id" IN ( SELECT "users"."org_id"
+           FROM "public"."users"
+          WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))))));
+
+
+
+CREATE POLICY "files_update" ON "public"."files" FOR UPDATE TO "authenticated" USING (("kb_id" IN ( SELECT "knowledge_bases"."id"
+   FROM "public"."knowledge_bases"
+  WHERE ("knowledge_bases"."org_id" IN ( SELECT "users"."org_id"
+           FROM "public"."users"
+          WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))))));
+
+
+
+ALTER TABLE "public"."instances_duplicate" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."kb" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "kb_insert" ON "public"."kb" FOR INSERT TO "authenticated" WITH CHECK (true);
+
+
+
+CREATE POLICY "kb_select" ON "public"."kb" FOR SELECT TO "authenticated" USING (true);
+
+
+
+ALTER TABLE "public"."knowledge_bases" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "knowledge_bases_delete" ON "public"."knowledge_bases" FOR DELETE TO "authenticated" USING (("org_id" IN ( SELECT "users"."org_id"
+   FROM "public"."users"
+  WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+CREATE POLICY "knowledge_bases_insert" ON "public"."knowledge_bases" FOR INSERT TO "authenticated" WITH CHECK (("org_id" IN ( SELECT "users"."org_id"
+   FROM "public"."users"
+  WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+CREATE POLICY "knowledge_bases_select" ON "public"."knowledge_bases" FOR SELECT TO "authenticated" USING (("org_id" IN ( SELECT "users"."org_id"
+   FROM "public"."users"
+  WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+CREATE POLICY "knowledge_bases_update" ON "public"."knowledge_bases" FOR UPDATE TO "authenticated" USING (("org_id" IN ( SELECT "users"."org_id"
+   FROM "public"."users"
+  WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+ALTER TABLE "public"."messages" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "messages_delete" ON "public"."messages" FOR DELETE TO "authenticated" USING (("conv_id" IN ( SELECT "conversations"."id"
+   FROM "public"."conversations"
+  WHERE ("conversations"."user_id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+CREATE POLICY "messages_insert" ON "public"."messages" FOR INSERT TO "authenticated" WITH CHECK (("conv_id" IN ( SELECT "conversations"."id"
+   FROM "public"."conversations"
+  WHERE ("conversations"."user_id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+CREATE POLICY "messages_select" ON "public"."messages" FOR SELECT TO "authenticated" USING (("conv_id" IN ( SELECT "conversations"."id"
+   FROM "public"."conversations"
+  WHERE ("conversations"."user_id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+CREATE POLICY "messages_update" ON "public"."messages" FOR UPDATE TO "authenticated" USING (("conv_id" IN ( SELECT "conversations"."id"
+   FROM "public"."conversations"
+  WHERE ("conversations"."user_id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+ALTER TABLE "public"."metrics" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "metrics_delete" ON "public"."metrics" FOR DELETE TO "authenticated" USING (("conv_id" IN ( SELECT "conversations"."id"
+   FROM "public"."conversations"
+  WHERE ("conversations"."user_id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+CREATE POLICY "metrics_insert" ON "public"."metrics" FOR INSERT TO "authenticated" WITH CHECK (("conv_id" IN ( SELECT "conversations"."id"
+   FROM "public"."conversations"
+  WHERE ("conversations"."user_id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+CREATE POLICY "metrics_select" ON "public"."metrics" FOR SELECT TO "authenticated" USING (("conv_id" IN ( SELECT "conversations"."id"
+   FROM "public"."conversations"
+  WHERE ("conversations"."user_id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+CREATE POLICY "metrics_update" ON "public"."metrics" FOR UPDATE TO "authenticated" USING (("conv_id" IN ( SELECT "conversations"."id"
+   FROM "public"."conversations"
+  WHERE ("conversations"."user_id" = ( SELECT "auth"."uid"() AS "uid")))));
+
+
+
+ALTER TABLE "public"."organizations" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "organizations_insert" ON "public"."organizations" FOR INSERT TO "authenticated" WITH CHECK (true);
+
+
+
+CREATE POLICY "organizations_select" ON "public"."organizations" FOR SELECT TO "authenticated" USING (true);
+
+
+
+CREATE POLICY "organizations_update" ON "public"."organizations" FOR UPDATE TO "authenticated" USING (true);
+
+
+
+ALTER TABLE "public"."user_roles" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "user_roles_select" ON "public"."user_roles" FOR SELECT TO "authenticated" USING (("user_id" = ( SELECT "auth"."uid"() AS "uid")));
+
+
+
+ALTER TABLE "public"."users" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."users_duplicate" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "users_insert" ON "public"."users" FOR INSERT TO "authenticated" WITH CHECK (true);
+
+
+
+CREATE POLICY "users_select" ON "public"."users" FOR SELECT TO "authenticated" USING (("id" = ( SELECT "auth"."uid"() AS "uid")));
+
+
+
+CREATE POLICY "users_update" ON "public"."users" FOR UPDATE TO "authenticated" USING (("id" = ( SELECT "auth"."uid"() AS "uid"))) WITH CHECK (("id" = ( SELECT "auth"."uid"() AS "uid")));
+
+
+
+
+
+ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
+
+
+GRANT USAGE ON SCHEMA "public" TO "postgres";
+GRANT USAGE ON SCHEMA "public" TO "anon";
+GRANT USAGE ON SCHEMA "public" TO "authenticated";
+GRANT USAGE ON SCHEMA "public" TO "service_role";
+
+
+
+
+
+GRANT ALL ON FUNCTION "public"."cleanup_expired_otps"() TO "anon";
+GRANT ALL ON FUNCTION "public"."cleanup_expired_otps"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."cleanup_expired_otps"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_user_org_id"("user_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_user_org_id"("user_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_user_org_id"("user_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."has_role"("_user_id" "uuid", "_role" "public"."app_role") TO "anon";
+GRANT ALL ON FUNCTION "public"."has_role"("_user_id" "uuid", "_role" "public"."app_role") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."has_role"("_user_id" "uuid", "_role" "public"."app_role") TO "service_role";
+
+
+
+
+
+
+
+
+
+GRANT ALL ON FUNCTION "public"."reset_messages_if_new_day"() TO "anon";
+GRANT ALL ON FUNCTION "public"."reset_messages_if_new_day"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."reset_messages_if_new_day"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."security_health_check"() TO "anon";
+GRANT ALL ON FUNCTION "public"."security_health_check"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."security_health_check"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."set_expiry"() TO "anon";
+GRANT ALL ON FUNCTION "public"."set_expiry"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."set_expiry"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."set_otp_expires_at"() TO "anon";
+GRANT ALL ON FUNCTION "public"."set_otp_expires_at"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."set_otp_expires_at"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."update_updated_at_column"() TO "anon";
+GRANT ALL ON FUNCTION "public"."update_updated_at_column"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."update_updated_at_column"() TO "service_role";
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+GRANT ALL ON TABLE "public"."api_keys" TO "anon";
+GRANT ALL ON TABLE "public"."api_keys" TO "authenticated";
+GRANT ALL ON TABLE "public"."api_keys" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."conversations" TO "anon";
+GRANT ALL ON TABLE "public"."conversations" TO "authenticated";
+GRANT ALL ON TABLE "public"."conversations" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."documents" TO "anon";
+GRANT ALL ON TABLE "public"."documents" TO "authenticated";
+GRANT ALL ON TABLE "public"."documents" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."files" TO "anon";
+GRANT ALL ON TABLE "public"."files" TO "authenticated";
+GRANT ALL ON TABLE "public"."files" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."instances_duplicate" TO "anon";
+GRANT ALL ON TABLE "public"."instances_duplicate" TO "authenticated";
+GRANT ALL ON TABLE "public"."instances_duplicate" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."kb" TO "anon";
+GRANT ALL ON TABLE "public"."kb" TO "authenticated";
+GRANT ALL ON TABLE "public"."kb" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."knowledge_bases" TO "anon";
+GRANT ALL ON TABLE "public"."knowledge_bases" TO "authenticated";
+GRANT ALL ON TABLE "public"."knowledge_bases" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."messages" TO "anon";
+GRANT ALL ON TABLE "public"."messages" TO "authenticated";
+GRANT ALL ON TABLE "public"."messages" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."metrics" TO "anon";
+GRANT ALL ON TABLE "public"."metrics" TO "authenticated";
+GRANT ALL ON TABLE "public"."metrics" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."organizations" TO "anon";
+GRANT ALL ON TABLE "public"."organizations" TO "authenticated";
+GRANT ALL ON TABLE "public"."organizations" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."user_roles" TO "anon";
+GRANT ALL ON TABLE "public"."user_roles" TO "authenticated";
+GRANT ALL ON TABLE "public"."user_roles" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."users" TO "anon";
+GRANT ALL ON TABLE "public"."users" TO "authenticated";
+GRANT ALL ON TABLE "public"."users" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."users_duplicate" TO "anon";
+GRANT ALL ON TABLE "public"."users_duplicate" TO "authenticated";
+GRANT ALL ON TABLE "public"."users_duplicate" TO "service_role";
+
+
+
+
+
+
+
+
+
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON SEQUENCES TO "postgres";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON SEQUENCES TO "anon";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON SEQUENCES TO "authenticated";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON SEQUENCES TO "service_role";
+
+
+
+
+
+
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "postgres";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "anon";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "authenticated";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "service_role";
+
+
+
+
+
+
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "postgres";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "anon";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "authenticated";
+ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
+

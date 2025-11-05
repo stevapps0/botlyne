@@ -98,7 +98,7 @@ def hash_api_key(key: str) -> str:
 
 def generate_api_key() -> str:
     """Generate a secure random API key."""
-    return "kb_" + secrets.token_urlsafe(32)
+    return "sk-" + secrets.token_urlsafe(32)
 
 @router.post("/apikeys", response_model=APIKeyFullResponse)
 async def create_api_key(

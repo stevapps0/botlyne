@@ -20,6 +20,7 @@ from src.core.config import settings
 class TokenData(BaseModel):
     user_id: str
     org_id: str | None = None
+    kb_id: str | None = None  # Add kb_id to token data
 
 # Dependency to get current user
 async def get_current_user(token: str = Depends(lambda: None)):
@@ -28,11 +29,15 @@ async def get_current_user(token: str = Depends(lambda: None)):
         # Check for org API key
         if token and token.startswith("Bearer "):
             api_key = token.replace("Bearer ", "")
-            if api_key.startswith("kb_") or api_key.startswith("sk-"):
-                # Validate API key (stored as plain text)
-                key_data = supabase.table("api_keys").select("*").eq("key_hash", api_key).eq("is_active", True).single().execute()
+            if api_key.startswith("sk-"):
+                # Validate API key and get associated KB
+                key_data = supabase.table("api_keys").select("org_id, kb_id").eq("key_hash", api_key).eq("is_active", True).single().execute()
                 if key_data.data:
-                    return TokenData(user_id="api_key_user", org_id=key_data.data["org_id"])
+                    return TokenData(
+                        user_id="api_key_user",
+                        org_id=key_data.data["org_id"],
+                        kb_id=key_data.data.get("kb_id")
+                    )
                 else:
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -46,7 +51,7 @@ async def get_current_user(token: str = Depends(lambda: None)):
 
         # This is a simplified version - in real implementation you'd validate the token
         # For now, return a mock user
-        return TokenData(user_id="mock_user", org_id="mock_org")
+        return TokenData(user_id="mock_user", org_id="mock_org", kb_id="mock_kb")
     except HTTPException:
         raise
     except Exception as e:
@@ -57,7 +62,18 @@ async def get_current_user(token: str = Depends(lambda: None)):
 
 router = APIRouter()
 
+# Standard API Response Model
+class APIResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[dict] = None
+    error: Optional[str] = None
+
 # Pydantic models
+class UploadRequest(BaseModel):
+    kb_id: str
+    urls: Optional[List[str]] = None
+
 class UploadResponse(BaseModel):
     batch_id: str
     message: str
@@ -71,18 +87,27 @@ class ProcessingStatus(BaseModel):
     total_items: Optional[int] = None
     completed_at: Optional[str] = None
 
+class GetUploadStatusRequest(BaseModel):
+    batch_id: str
+
+class ListKBFilesRequest(BaseModel):
+    kb_id: str
+
 # In-memory status tracking (use Redis/DB for production)
 processing_status = {}
 
 async def process_batch_async(batch_id: str, kb_id: str, files_data: List[dict], urls: List[str]):
     """Background task to process uploaded files and URLs"""
     try:
-        processing_status[batch_id] = ProcessingStatus(
+        status_obj = ProcessingStatus(
             batch_id=batch_id,
             status="processing",
             progress=0,
             total_items=len(files_data) + len(urls)
         )
+        # Add kb_id to status object for filtering
+        status_obj.kb_id = kb_id
+        processing_status[batch_id] = status_obj
 
         total_processed = 0
 
@@ -121,24 +146,34 @@ async def process_batch_async(batch_id: str, kb_id: str, files_data: List[dict],
         logger.error(f"Batch processing failed: {e}")
         processing_status[batch_id].status = "failed"
 
-@router.post("/kbs/{kb_id}/upload", response_model=UploadResponse)
+@router.post("/upload", response_model=APIResponse)
 async def upload_knowledge(
-    kb_id: str,
     background_tasks: BackgroundTasks,
     files: Optional[List[UploadFile]] = File(None),
-    urls: Optional[List[str]] = None,
+    urls: Optional[str] = None,  # JSON string for URLs
     current_user: TokenData = Depends(get_current_user)
 ):
     """Upload files and URLs to knowledge base"""
     try:
-        # Verify KB access
-        kb_check = supabase.table("knowledge_bases").select("org_id").eq("id", kb_id).single().execute()
-        if not kb_check.data or kb_check.data["org_id"] != current_user.org_id:
-            raise HTTPException(status_code=403, detail="Access denied")
+        # Check if user has a KB associated with their API key
+        if not current_user.kb_id:
+            return APIResponse(
+                success=False,
+                message="No knowledge base associated with this API key. Please create a knowledge base first.",
+                error="kb_not_found"
+            )
+
+        # Parse URLs if provided
+        urls_list = []
+        if urls:
+            try:
+                import json
+                urls_list = json.loads(urls)
+            except:
+                urls_list = [urls] if urls else []
 
         batch_id = str(uuid.uuid4())
         files_data = []
-        urls_list = urls or []
 
         # Process uploaded files
         if files:
@@ -156,12 +191,12 @@ async def upload_knowledge(
             raise HTTPException(status_code=400, detail="No files or URLs provided")
 
         # Start background processing
-        background_tasks.add_task(process_batch_async, batch_id, kb_id, files_data, urls_list)
+        background_tasks.add_task(process_batch_async, batch_id, current_user.kb_id, files_data, urls_list)
 
         # Record files in database
         for file_data in files_data:
             file_record = {
-                "kb_id": kb_id,
+                "kb_id": current_user.kb_id,
                 "filename": file_data["filename"],
                 "file_type": file_data["filename"].split(".")[-1] if "." in file_data["filename"] else "unknown",
                 "size_bytes": len(file_data["content"]),
@@ -171,7 +206,7 @@ async def upload_knowledge(
 
         for url in urls_list:
             file_record = {
-                "kb_id": kb_id,
+                "kb_id": current_user.kb_id,
                 "filename": url,
                 "url": url,
                 "file_type": "url",
@@ -179,52 +214,76 @@ async def upload_knowledge(
             }
             supabase.table("files").insert(file_record).execute()
 
-        return UploadResponse(
-            batch_id=batch_id,
+        return APIResponse(
+            success=True,
             message="Upload initiated. Processing in background.",
-            files_processed=len(files_data),
-            urls_processed=len(urls_list)
+            data={
+                "files_processed": len(files_data),
+                "urls_processed": len(urls_list)
+            }
         )
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Upload failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Upload failed"
+        return APIResponse(
+            success=False,
+            message="Upload failed",
+            error=str(e)
         )
 
-@router.get("/upload/status/{batch_id}", response_model=ProcessingStatus)
-async def get_upload_status(
-    batch_id: str,
-    current_user: TokenData = Depends(get_current_user)
-):
-    """Get processing status for an upload batch"""
-    if batch_id not in processing_status:
-        raise HTTPException(status_code=404, detail="Batch not found")
-
-    return processing_status[batch_id]
-
-@router.get("/kbs/{kb_id}/files")
-async def list_kb_files(
-    kb_id: str,
-    current_user: TokenData = Depends(get_current_user)
-):
-    """List all files in a knowledge base"""
+@router.get("/upload/status", response_model=APIResponse)
+async def get_upload_status(current_user: TokenData = Depends(get_current_user)):
+    """Get processing status for the user's knowledge base"""
     try:
-        # Verify KB access
-        kb_check = supabase.table("knowledge_bases").select("org_id").eq("id", kb_id).single().execute()
-        if not kb_check.data or kb_check.data["org_id"] != current_user.org_id:
-            raise HTTPException(status_code=403, detail="Access denied")
+        # Get the most recent processing status for this user's KB
+        kb_statuses = {k: v for k, v in processing_status.items() if hasattr(v, 'kb_id') and v.kb_id == current_user.kb_id}
 
-        result = supabase.table("files").select("*").eq("kb_id", kb_id).execute()
-        return {"files": result.data}
+        if not kb_statuses:
+            return APIResponse(
+                success=True,
+                message="No active uploads found",
+                data={"status": "idle", "message": "No uploads in progress"}
+            )
 
-    except HTTPException:
-        raise
+        # Return the most recent status
+        latest_batch_id = max(kb_statuses.keys())
+        status_data = kb_statuses[latest_batch_id]
+
+        return APIResponse(
+            success=True,
+            message="Status retrieved successfully",
+            data={"status": status_data.dict()}
+        )
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to list files: {str(e)}"
+        return APIResponse(
+            success=False,
+            message="Failed to get upload status",
+            error=str(e)
+        )
+
+@router.get("/files", response_model=APIResponse)
+async def list_kb_files(current_user: TokenData = Depends(get_current_user)):
+    """List all files in the user's knowledge base"""
+    try:
+        if not current_user.kb_id:
+            return APIResponse(
+                success=False,
+                message="No knowledge base associated with this API key",
+                error="kb_not_found"
+            )
+
+        result = supabase.table("files").select("*").eq("kb_id", current_user.kb_id).execute()
+        return APIResponse(
+            success=True,
+            message="Files retrieved successfully",
+            data={"files": result.data}
+        )
+
+    except Exception as e:
+        return APIResponse(
+            success=False,
+            message="Failed to list files",
+            error=str(e)
         )
