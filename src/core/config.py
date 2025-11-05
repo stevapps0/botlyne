@@ -11,8 +11,8 @@ class Settings:
     """Application settings loaded from environment variables."""
 
     # Supabase Configuration
-    SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
-    SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "")
+    SUPABASE_URL: str = os.getenv("SUPABASE_URL", "http://127.0.0.1:54321")
+    SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH")
 
     # AI Configuration
     GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
@@ -32,14 +32,6 @@ class Settings:
     # Optional OAuth Redirect URLs
     GOOGLE_REDIRECT_URL: str = os.getenv("GOOGLE_REDIRECT_URL", "http://localhost:3000/auth/callback")
     GITHUB_REDIRECT_URL: str = os.getenv("GITHUB_REDIRECT_URL", "http://localhost:3000/auth/callback")
-
-
-    def __init__(self) -> None:
-        """Validate required settings on initialization."""
-        if not self.SUPABASE_URL or not self.SUPABASE_ANON_KEY:
-            # Use default local Supabase if not set
-            self.SUPABASE_URL = "http://127.0.0.1:54321"
-            self.SUPABASE_ANON_KEY = "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH"
 
 
 # Global settings instance

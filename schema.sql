@@ -295,6 +295,7 @@ CREATE TABLE IF NOT EXISTS "public"."api_keys" (
     "id" "uuid" DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
     "org_id" "uuid" NOT NULL,
     "name" "text" NOT NULL,
+    "api_key" "text",
     "key_hash" "text" NOT NULL,
     "permissions" "jsonb" DEFAULT '{"read": true, "admin": false, "write": true}'::"jsonb",
     "created_by" "uuid" NOT NULL,
@@ -1713,6 +1714,107 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 
 
+-- HMAC trigger function for API keys
+CREATE OR REPLACE FUNCTION public.api_keys_hash_trigger()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  secret text;
+  computed text;
+BEGIN
+  -- secret should be set as a Postgres setting via ALTER DATABASE or set in environment; fallback to empty if not set
+  -- Use current_setting to read a runtime setting 'app.hmac_secret'. Set it via: ALTER SYSTEM SET "app.hmac_secret" = 'your_secret'; SELECT pg_reload_conf();
+  BEGIN
+    secret := current_setting('app.hmac_secret');
+  EXCEPTION WHEN others THEN
+    secret := NULL;
+  END;
+
+  -- Only run when api_key provided and not empty
+  IF NEW.api_key IS NOT NULL AND length(trim(NEW.api_key)) > 0 THEN
+    IF secret IS NULL OR secret = '' THEN
+      RAISE EXCEPTION 'HMAC secret app.hmac_secret is not set. Set it before inserting API keys.';
+    END IF;
+
+    -- Compute HMAC-SHA256, output as hex
+    computed := encode(hmac(NEW.api_key::bytea, secret::bytea, 'sha256'), 'hex');
+
+    NEW.key_hash := computed;
+    -- optionally store partial masked key for debugging; here we nullify plain key to avoid storing it
+    NEW.api_key := NULL;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+-- Create trigger to call the function on INSERT or UPDATE
+DROP TRIGGER IF EXISTS api_keys_hash_trigger ON public.api_keys;
+CREATE TRIGGER api_keys_hash_trigger
+BEFORE INSERT OR UPDATE ON public.api_keys
+FOR EACH ROW
+EXECUTE FUNCTION public.api_keys_hash_trigger();
+
+-- Create function to verify API key (returns key details if valid)
+CREATE OR REPLACE FUNCTION public.verify_api_key(api_key text)
+RETURNS TABLE(id uuid, org_id uuid, name text, permissions jsonb, expires_at timestamptz, is_active boolean, last_used_at timestamptz, kb_id uuid)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  secret text;
+  computed_hash text;
+  key_id uuid;
+BEGIN
+  -- Get the secret
+  BEGIN
+    secret := current_setting('app.hmac_secret');
+  EXCEPTION WHEN others THEN
+    secret := NULL;
+  END;
+
+  IF secret IS NULL OR secret = '' THEN
+    RAISE EXCEPTION 'HMAC secret app.hmac_secret is not set.';
+  END IF;
+
+  -- Compute the hash for the provided key
+  computed_hash := encode(hmac(api_key::bytea, secret::bytea, 'sha256'), 'hex');
+
+  -- Find the key and update last_used_at if valid
+  SELECT ak.id INTO key_id
+  FROM public.api_keys ak
+  WHERE ak.key_hash = computed_hash
+    AND ak.is_active = true
+    AND (ak.expires_at IS NULL OR ak.expires_at > now())
+  LIMIT 1;
+
+  -- Update last_used_at if key found
+  IF key_id IS NOT NULL THEN
+    UPDATE public.api_keys SET last_used_at = now() WHERE id = key_id;
+  END IF;
+
+  -- Return matching row if valid
+  RETURN QUERY
+  SELECT ak.id, ak.org_id, ak.name, ak.permissions, ak.expires_at, ak.is_active, ak.last_used_at, ak.kb_id
+  FROM public.api_keys ak
+  WHERE ak.id = key_id;
+END;
+$$;
+
+-- Create function to update last_used_at for a key
+CREATE OR REPLACE FUNCTION public.update_key_last_used(key_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  UPDATE public.api_keys
+  SET last_used_at = now()
+  WHERE id = key_id;
+END;
+$$;
 
 
 

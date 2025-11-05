@@ -40,18 +40,18 @@ async def get_current_user(authorization: str = Header(None, alias="Authorizatio
                     logger.info("Validating API key using database function")
 
                     # Call the database function to verify the key
-                    verification_result = supabase.rpc("verify_api_key", {"api_key_text": api_key}).execute()
+                    verification_result = supabase.rpc("verify_api_key", {"api_key": api_key}).execute()
 
                     logger.info(f"Verification result: {verification_result.data}")
 
-                    if verification_result.data and len(verification_result.data) > 0 and verification_result.data[0]["is_valid"]:
+                    if verification_result.data and len(verification_result.data) > 0:
                         key_info = verification_result.data[0]
-                        logger.info(f"Valid key found: kb_id = {key_info.get('kb_id')}, org_id = {key_info.get('org_id')}")
+                        logger.info(f"Valid key found: org_id = {key_info.get('org_id')}")
 
                         return TokenData(
                             user_id="api_key_user",
                             org_id=key_info.get("org_id"),
-                            kb_id=key_info.get("kb_id")
+                            kb_id=None  # kb_id not returned by verify_api_key function
                         )
                     else:
                         logger.warning("Key not valid or kb_id is null")

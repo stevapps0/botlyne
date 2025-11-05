@@ -56,24 +56,18 @@ async def get_current_user(token: str = Depends(lambda: None)):
                     derived_shortcode = api_key[-6:]
 
                     # Use the verify_api_key database function
-                    result = supabase.rpc(
-                        "verify_api_key",
-                        {
-                            "plain_key": api_key,
-                            "key_shortcode": derived_shortcode
-                        }
-                    ).execute()
+                    result = supabase.rpc("verify_api_key", {"api_key": api_key}).execute()
 
-                    if result.data and len(result.data) > 0 and result.data[0]["is_valid"]:
+                    if result.data and len(result.data) > 0:
                         key_info = result.data[0]
 
                         # Update last_used_at
-                        supabase.rpc("update_key_last_used", {"key_id": key_info["api_key_id"]}).execute()
+                        supabase.rpc("update_key_last_used", {"key_id": key_info["id"]}).execute()
 
                         return TokenData(
                             user_id="api_key_user",
                             org_id=str(key_info["org_id"]),
-                            kb_id=str(key_info["kb_id"]) if key_info["kb_id"] else None
+                            kb_id=None  # kb_id not returned by verify_api_key function
                         )
                     else:
                         raise HTTPException(
@@ -147,18 +141,17 @@ async def create_api_key(
 
         # Generate API key
         api_key = generate_api_key()
-        key_hash = hash_api_key(api_key)
 
         # Calculate expiration
         expires_at = None
         if data.expires_in_days:
             expires_at = datetime.utcnow() + timedelta(days=data.expires_in_days)
 
-        # Create API key record
+        # Create API key record - trigger will hash the api_key and nullify it
         key_data = {
             "org_id": current_user.org_id,
             "name": data.name,
-            "key_hash": key_hash,
+            "api_key": api_key,  # Plain key - trigger will hash and nullify
             "permissions": data.permissions,
             "created_by": current_user.user_id,
             "expires_at": expires_at.isoformat() if expires_at else None,

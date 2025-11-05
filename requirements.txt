@@ -7,3 +7,4 @@ httpx
 pydantic-ai
 python-multipart
 python-dotenv
+asyncpg

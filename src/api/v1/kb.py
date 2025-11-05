@@ -84,7 +84,7 @@ async def get_current_user(authorization: str = Header(None, alias="Authorizatio
                         logger.info(f"KB: Valid key found: kb_id = {key_info.get('kb_id')}, org_id = {key_info.get('org_id')}")
 
                         # Update last_used_at
-                        supabase.rpc("update_key_last_used", {"key_id": key_info["api_key_id"]}).execute()
+                        supabase.rpc("update_key_last_used", {"key_id": key_info["id"]}).execute()
 
                         return TokenData(
                             user_id="api_key_user",
