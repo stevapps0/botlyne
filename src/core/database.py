@@ -28,13 +28,13 @@ def verify_key_by_hash(plain_key: str):
         return row
     return None
 
-def verify_api_key_db(plain_key: str):
+async def verify_api_key_db(plain_key: str):
     """
-    Calls the Postgres function verify_api_key(api_key TEXT)
+    Calls the Postgres function verify_api_key(p_plain_key TEXT)
     and returns the first matching row, or None.
     """
     # Supabase RPC = call Postgres function
-    res = supabase.rpc("verify_api_key", {"api_key": plain_key}).execute()
+    res = supabase.rpc("verify_api_key", {"p_plain_key": plain_key}).execute()
 
     if res.error:
         print("Supabase RPC Error:", res.error)

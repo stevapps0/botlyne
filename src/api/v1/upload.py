@@ -40,7 +40,7 @@ async def get_current_user(authorization: str = Header(None, alias="Authorizatio
                     logger.info("Validating API key using database function")
 
                     # Call the database function to verify the key
-                    verification_result = supabase.rpc("verify_api_key", {"api_key": api_key}).execute()
+                    verification_result = supabase.rpc("verify_api_key", {"p_plain_key": api_key}).execute()
 
                     logger.info(f"Verification result: {verification_result.data}")
 
@@ -51,7 +51,7 @@ async def get_current_user(authorization: str = Header(None, alias="Authorizatio
                         return TokenData(
                             user_id="api_key_user",
                             org_id=key_info.get("org_id"),
-                            kb_id=None  # kb_id not returned by verify_api_key function
+                            kb_id=key_info.get("kb_id")
                         )
                     else:
                         logger.warning("Key not valid or kb_id is null")
@@ -133,7 +133,7 @@ async def process_batch_async(batch_id: str, kb_id: str, files_data: List[dict],
             total_items=len(files_data) + len(urls)
         )
         # Add kb_id to status object for filtering
-        status_obj.kb_id = kb_id
+        status_obj.batch_id = kb_id
         processing_status[batch_id] = status_obj
 
         total_processed = 0
