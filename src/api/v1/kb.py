@@ -106,7 +106,7 @@ async def create_knowledge_base(
     """Create a new knowledge base in an organization"""
     try:
         # Get org_id from shortcode
-        org_result = supabase.table("organizations").select("id").eq("org_id_shortcode", data.shortcode).single().execute()
+        org_result = supabase.table("organizations").select("id").eq("shortcode", data.shortcode).single().execute()
         if not org_result.data:
             raise HTTPException(status_code=404, detail="Organization not found")
 

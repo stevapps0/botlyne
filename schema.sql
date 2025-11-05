@@ -436,7 +436,7 @@ CREATE TABLE IF NOT EXISTS "public"."organizations" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "description" "text",
     "team_size" integer,
-    "org_id_shortcode" "text" UNIQUE
+    "shortcode" "text" UNIQUE
 );
 
 
