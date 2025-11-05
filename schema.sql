@@ -294,7 +294,6 @@ SET default_table_access_method = "heap";
 CREATE TABLE IF NOT EXISTS "public"."api_keys" (
     "id" "uuid" DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
     "org_id" "uuid" NOT NULL,
-    "kb_id" "uuid" REFERENCES "public"."knowledge_bases"("id") ON DELETE SET NULL,
     "name" "text" NOT NULL,
     "key_hash" "text" NOT NULL,
     "permissions" "jsonb" DEFAULT '{"read": true, "admin": false, "write": true}'::"jsonb",
@@ -302,7 +301,9 @@ CREATE TABLE IF NOT EXISTS "public"."api_keys" (
     "last_used_at" timestamp with time zone,
     "expires_at" timestamp with time zone,
     "is_active" boolean DEFAULT true,
-    "created_at" timestamp with time zone DEFAULT "now"()
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "shortcode" character varying(6) NOT NULL,
+    "kb_id" "uuid" NOT NULL
 );
 
 
@@ -435,8 +436,7 @@ CREATE TABLE IF NOT EXISTS "public"."organizations" (
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "description" "text",
-    "team_size" integer,
-    "shortcode" "text" UNIQUE
+    "team_size" integer
 );
 
 
@@ -495,6 +495,11 @@ ALTER TABLE ONLY "public"."api_keys"
 
 ALTER TABLE ONLY "public"."api_keys"
     ADD CONSTRAINT "api_keys_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."api_keys"
+    ADD CONSTRAINT "api_keys_shortcode_key" UNIQUE ("shortcode");
 
 
 
@@ -587,15 +592,15 @@ CREATE INDEX "idx_api_keys_active" ON "public"."api_keys" USING "btree" ("is_act
 
 
 
-CREATE INDEX "idx_api_keys_kb_id" ON "public"."api_keys" USING "btree" ("kb_id");
-
-
-
 CREATE INDEX "idx_api_keys_key_hash" ON "public"."api_keys" USING "btree" ("key_hash");
 
 
 
 CREATE INDEX "idx_api_keys_org_id" ON "public"."api_keys" USING "btree" ("org_id");
+
+
+
+CREATE INDEX "idx_api_keys_shortcode" ON "public"."api_keys" USING "btree" ("shortcode");
 
 
 
@@ -884,6 +889,10 @@ CREATE POLICY "knowledge_bases_select" ON "public"."knowledge_bases" FOR SELECT 
 
 
 
+CREATE POLICY "knowledge_bases_service_insert" ON "public"."knowledge_bases" FOR INSERT TO "service_role" WITH CHECK (true);
+
+
+
 CREATE POLICY "knowledge_bases_update" ON "public"."knowledge_bases" FOR UPDATE TO "authenticated" USING (("org_id" IN ( SELECT "users"."org_id"
    FROM "public"."users"
   WHERE ("users"."id" = ( SELECT "auth"."uid"() AS "uid")))));
@@ -993,6 +1002,496 @@ GRANT USAGE ON SCHEMA "public" TO "postgres";
 GRANT USAGE ON SCHEMA "public" TO "anon";
 GRANT USAGE ON SCHEMA "public" TO "authenticated";
 GRANT USAGE ON SCHEMA "public" TO "service_role";
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1187,4 +1686,33 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "anon";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

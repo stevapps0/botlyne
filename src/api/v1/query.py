@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Header
 from pydantic import BaseModel
 from typing import List, Optional
 import time
@@ -17,25 +17,64 @@ from src.core.database import supabase
 class TokenData(BaseModel):
     user_id: str
     org_id: str | None = None
+    kb_id: str | None = None
 
 # Dependency to get current user
-async def get_current_user(token: str = Depends(lambda: None)):
+async def get_current_user(authorization: str = Header(None, alias="Authorization")):
     """Extract and validate user from JWT token or API key."""
     try:
+        logger.info(f"Query auth attempt with Authorization header: {authorization[:30]}..." if authorization else "No Authorization header")
+
         # Check for org API key
-        if token and token.startswith("Bearer "):
-            api_key = token.replace("Bearer ", "")
+        if authorization and authorization.startswith("Bearer "):
+            api_key = authorization.replace("Bearer ", "")
+            logger.info(f"Extracted API key: {api_key[:15]}...")
+
             if api_key.startswith("kb_") or api_key.startswith("sk-"):
-                # Validate API key (stored as plain text)
-                key_data = supabase.table("api_keys").select("*").eq("key_hash", api_key).eq("is_active", True).single().execute()
-                if key_data.data:
-                    return TokenData(user_id="api_key_user", org_id=key_data.data["org_id"])
-                else:
+                # Validate API key using database verification function
+                try:
+                    derived_shortcode = api_key[-6:]
+                    logger.info(f"Testing key with shortcode: {derived_shortcode}")
+
+                    # Use the verify_api_key database function
+                    result = supabase.rpc(
+                        "verify_api_key",
+                        {
+                            "plain_key": api_key,
+                            "key_shortcode": derived_shortcode
+                        }
+                    ).execute()
+
+                    logger.info(f"Verification result: {result.data}")
+
+                    if result.data and len(result.data) > 0 and result.data[0]["is_valid"]:
+                        key_info = result.data[0]
+                        logger.info(f"Valid key found: kb_id = {key_info.get('kb_id')}, org_id = {key_info.get('org_id')}")
+
+                        # Update last_used_at
+                        supabase.rpc("update_key_last_used", {"key_id": key_info["api_key_id"]}).execute()
+
+                        return TokenData(
+                            user_id="api_key_user",
+                            org_id=key_info.get("org_id"),
+                            kb_id=key_info.get("kb_id")
+                        )
+                    else:
+                        logger.warning("Key not valid or kb_id is null")
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid API key"
+                        )
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    logger.error(f"Verification error: {e}")
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Invalid API key"
+                        detail="API key verification failed"
                     )
             else:
+                logger.warning(f"Invalid API key format: {api_key[:15]}...")
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid API key format"
@@ -43,10 +82,12 @@ async def get_current_user(token: str = Depends(lambda: None)):
 
         # This is a simplified version - in real implementation you'd validate the token
         # For now, return a mock user
-        return TokenData(user_id="mock_user", org_id="mock_org")
+        logger.warning("No valid Bearer token found, using mock user")
+        return TokenData(user_id="mock_user", org_id="mock_org", kb_id=None)
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Token validation failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token validation failed"
@@ -57,7 +98,6 @@ router = APIRouter()
 # Pydantic models
 class QueryRequest(BaseModel):
     query: str
-    kb_id: str
     conversation_id: Optional[str] = None  # For continuing conversations
 
 class QueryResponse(BaseModel):
@@ -136,8 +176,14 @@ async def query_knowledge_base(
     start_time = time.time()
 
     try:
+        # Use KB from API key if not specified in request
+        kb_id = data.kb_id if hasattr(data, 'kb_id') and data.kb_id else current_user.kb_id
+
+        if not kb_id:
+            raise HTTPException(status_code=400, detail="No knowledge base specified")
+
         # Verify KB access
-        kb_check = supabase.table("knowledge_bases").select("org_id").eq("id", data.kb_id).single().execute()
+        kb_check = supabase.table("knowledge_bases").select("org_id").eq("id", kb_id).single().execute()
         if not kb_check.data or kb_check.data["org_id"] != current_user.org_id:
             raise HTTPException(status_code=403, detail="Access denied")
 
@@ -146,7 +192,7 @@ async def query_knowledge_base(
         if not conversation_id:
             conv_result = supabase.table("conversations").insert({
                 "user_id": current_user.user_id,
-                "kb_id": data.kb_id
+                "kb_id": kb_id
             }).execute()
             conversation_id = conv_result.data[0]["id"]
         else:
@@ -156,7 +202,7 @@ async def query_knowledge_base(
                 raise HTTPException(status_code=403, detail="Access denied")
 
         # Retrieve similar documents
-        similar_docs = retrieve_similar(data.query, limit=5, table_name="documents")
+        similar_docs = retrieve_similar(data.query, kb_id=kb_id, limit=5, table_name="documents")
 
         # Format context for agent
         context = ""

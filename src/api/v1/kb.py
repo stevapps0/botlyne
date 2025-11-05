@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Header
 from pydantic import BaseModel
 from typing import List, Optional
 import hashlib
+import logging
 
 from src.core.database import supabase
 
@@ -15,51 +16,87 @@ class TokenData(BaseModel):
     kb_id: str | None = None
 
 # Dependency to get current user
-async def get_current_user(token: str = Depends(lambda: None)):
+async def get_current_user(authorization: str = Header(None, alias="Authorization")):
     """Extract and validate user from JWT token or API key."""
     try:
+        logger.info(f"KB auth attempt with Authorization header: {authorization[:30]}..." if authorization else "No Authorization header")
+
         # Check for org API key
-        if token and token.startswith("Bearer "):
-            api_key = token.replace("Bearer ", "")
+        if authorization and authorization.startswith("Bearer "):
+            api_key = authorization.replace("Bearer ", "")
+            logger.info(f"Extracted API key: {api_key[:15]}...")
+
             if api_key.startswith("sk-"):
-                # Validate API key and get associated KB
-                key_data = supabase.table("api_keys").select("org_id, kb_id").eq("key_hash", api_key).eq("is_active", True).single().execute()
-                if key_data.data:
-                    return TokenData(
-                        user_id="api_key_user",
-                        org_id=key_data.data["org_id"],
-                        kb_id=key_data.data.get("kb_id")
-                    )
-                else:
+                # Validate API key using database verification function
+                try:
+                    derived_shortcode = api_key[-6:]
+                    logger.info(f"Testing key with shortcode: {derived_shortcode}")
+
+                    # Use the verify_api_key database function
+                    result = supabase.rpc(
+                        "verify_api_key",
+                        {
+                            "plain_key": api_key,
+                            "key_shortcode": derived_shortcode
+                        }
+                    ).execute()
+
+                    logger.info(f"Verification result: {result.data}")
+
+                    if result.data and len(result.data) > 0 and result.data[0]["is_valid"]:
+                        key_info = result.data[0]
+                        logger.info(f"Valid key found: kb_id = {key_info.get('kb_id')}, org_id = {key_info.get('org_id')}")
+
+                        # Update last_used_at
+                        supabase.rpc("update_key_last_used", {"key_id": key_info["api_key_id"]}).execute()
+
+                        return TokenData(
+                            user_id="api_key_user",
+                            org_id=key_info.get("org_id"),
+                            kb_id=key_info.get("kb_id")
+                        )
+                    else:
+                        logger.warning("Key not valid or kb_id is null")
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid API key"
+                        )
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    logger.error(f"Verification error: {e}")
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Invalid API key"
+                        detail="API key verification failed"
                     )
             else:
+                logger.warning(f"Invalid API key format: {api_key[:15]}...")
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid API key format"
                 )
 
         # For testing, extract user ID from mock token
-        if token and token.startswith("Bearer mock-token-"):
-            user_id = token.replace("Bearer mock-token-", "")
+        if authorization and authorization.startswith("Bearer mock-token-"):
+            user_id = authorization.replace("Bearer mock-token-", "")
             # Get user org from database
             user_data = supabase.table("users").select("org_id").eq("id", user_id).single().execute()
             org_id = user_data.data.get("org_id") if user_data.data else None
             return TokenData(user_id=user_id, org_id=org_id, kb_id="mock_kb")
-        elif token and token.startswith("mock-token-"):
+        elif authorization and authorization.startswith("mock-token-"):
             # Handle query parameter style tokens
-            user_id = token.replace("mock-token-", "")
+            user_id = authorization.replace("mock-token-", "")
             user_data = supabase.table("users").select("org_id").eq("id", user_id).single().execute()
             org_id = user_data.data.get("org_id") if user_data.data else None
             return TokenData(user_id=user_id, org_id=org_id, kb_id="mock_kb")
         else:
             # This is a simplified version - in real implementation you'd validate the token
+            logger.warning("No valid Bearer token found, using mock user")
             return TokenData(user_id="mock_user", org_id="mock_org", kb_id="mock_kb")
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Token validation failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token validation failed"
@@ -124,8 +161,8 @@ async def create_knowledge_base(
         result = supabase.table("knowledge_bases").insert(kb_data).execute()
         kb = result.data[0]
 
-        # Update API key with KB association (assuming single KB per API key for simplicity)
-        supabase.table("api_keys").update({"kb_id": kb["id"]}).eq("org_id", org_id).execute()
+        # Note: API keys are now associated individually via the /apikeys/{key_id}/associate-kb endpoint
+        # This ensures each key can be scoped to a specific KB for better access control
 
         return APIResponse(
             success=True,
@@ -181,7 +218,7 @@ class GetKBRequest(BaseModel):
 async def get_current_knowledge_base(current_user: TokenData = Depends(get_current_user)):
     """Get the user's associated knowledge base details"""
     try:
-        if not current_user.kb_id:
+        if not current_user.kb_id or current_user.kb_id == "mock_kb":
             return APIResponse(
                 success=False,
                 message="No knowledge base associated with this API key",

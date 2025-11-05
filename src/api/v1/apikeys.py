@@ -24,6 +24,7 @@ class APIKeyResponse(BaseModel):
     expires_at: Optional[str]
     last_used_at: Optional[str]
     is_active: bool
+    kb_id: Optional[str] = None
 
 class APIKeyFullResponse(BaseModel):
     id: str
@@ -34,11 +35,13 @@ class APIKeyFullResponse(BaseModel):
     expires_at: Optional[str]
     last_used_at: Optional[str]
     is_active: bool
+    kb_id: Optional[str] = None
 
 # Pydantic models for dependencies
 class TokenData(BaseModel):
     user_id: str
     org_id: str | None = None
+    kb_id: str | None = None
 
 # Dependency to get current user
 async def get_current_user(token: str = Depends(lambda: None)):
@@ -48,10 +51,42 @@ async def get_current_user(token: str = Depends(lambda: None)):
         if token and token.startswith("Bearer "):
             api_key = token.replace("Bearer ", "")
             if api_key.startswith("kb_") or api_key.startswith("sk-"):
-                # Validate API key (stored as plain text)
-                key_data = supabase.table("api_keys").select("*").eq("key_hash", api_key).eq("is_active", True).single().execute()
-                if key_data.data:
-                    return TokenData(user_id="api_key_user", org_id=key_data.data["org_id"])
+                # Validate API key using database verification function
+                try:
+                    derived_shortcode = api_key[-6:]
+
+                    # Use the verify_api_key database function
+                    result = supabase.rpc(
+                        "verify_api_key",
+                        {
+                            "plain_key": api_key,
+                            "key_shortcode": derived_shortcode
+                        }
+                    ).execute()
+
+                    if result.data and len(result.data) > 0 and result.data[0]["is_valid"]:
+                        key_info = result.data[0]
+
+                        # Update last_used_at
+                        supabase.rpc("update_key_last_used", {"key_id": key_info["api_key_id"]}).execute()
+
+                        return TokenData(
+                            user_id="api_key_user",
+                            org_id=str(key_info["org_id"]),
+                            kb_id=str(key_info["kb_id"]) if key_info["kb_id"] else None
+                        )
+                    else:
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid API key"
+                        )
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="API key verification failed"
+                    )
 
         # For testing, extract user ID from mock token
         if token and token.startswith("Bearer mock-token-"):
@@ -127,7 +162,8 @@ async def create_api_key(
             "permissions": data.permissions,
             "created_by": current_user.user_id,
             "expires_at": expires_at.isoformat() if expires_at else None,
-            "is_active": True
+            "is_active": True,
+            "kb_id": None  # New keys start without KB association
         }
 
         result = supabase.table("api_keys").insert(key_data).execute()
@@ -141,7 +177,8 @@ async def create_api_key(
             created_at=created_key["created_at"],
             expires_at=created_key["expires_at"],
             last_used_at=created_key["last_used_at"],
-            is_active=created_key["is_active"]
+            is_active=created_key["is_active"],
+            kb_id=created_key.get("kb_id")
         )
 
     except HTTPException:
@@ -174,7 +211,8 @@ async def list_api_keys(current_user: TokenData = Depends(require_admin)):
                 created_at=key["created_at"],
                 expires_at=key["expires_at"],
                 last_used_at=key["last_used_at"],
-                is_active=key["is_active"]
+                is_active=key["is_active"],
+                kb_id=key.get("kb_id")
             ))
 
         return keys
@@ -213,6 +251,40 @@ async def delete_api_key(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to delete API key: {str(e)}"
+        )
+
+@router.put("/apikeys/{key_id}/associate-kb")
+async def associate_api_key_with_kb(
+    key_id: str,
+    kb_id: str,
+    current_user: TokenData = Depends(require_admin)
+):
+    """Associate an API key with a knowledge base (admin only)"""
+    try:
+        if not current_user.org_id:
+            raise HTTPException(status_code=400, detail="User must belong to an organization")
+
+        # Verify key belongs to user's org
+        key_data = supabase.table("api_keys").select("org_id").eq("id", key_id).single().execute()
+        if not key_data.data or key_data.data["org_id"] != current_user.org_id:
+            raise HTTPException(status_code=404, detail="API key not found")
+
+        # Verify KB belongs to user's org
+        kb_data = supabase.table("knowledge_bases").select("org_id").eq("id", kb_id).single().execute()
+        if not kb_data.data or kb_data.data["org_id"] != current_user.org_id:
+            raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+        # Associate key with KB
+        supabase.table("api_keys").update({"kb_id": kb_id}).eq("id", key_id).execute()
+
+        return {"message": "API key associated with knowledge base successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to associate API key with knowledge base: {str(e)}"
         )
 
 @router.put("/apikeys/{key_id}/toggle")
