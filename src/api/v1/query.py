@@ -246,22 +246,25 @@ async def query_knowledge_base(
             logger.warning("No context found from knowledge base - empty results")
             context = "No relevant information found in the knowledge base."
 
-        system_prompt = f"""You are a helpful AI assistant answering questions based on the provided knowledge base context.
+        # Include context in the user query itself since PydanticAI doesn't support runtime system prompt changes
+        enhanced_query = f"""Based on the following knowledge base context, please answer the user's question.
 
-Context from knowledge base:
+Knowledge Base Context:
 {context}
 
-Answer the user's question using the context above. If the context doesn't contain relevant information, say so clearly.
-Be concise but helpful."""
+User Question: {data.query}
 
-        # Use Pydantic AI agent
+If the context doesn't contain relevant information to answer the question, please say so clearly."""
+
+        logger.info(f"Sending enhanced query to AI agent with context length: {len(context)}")
         result = await agent.run(
-            data.query,
+            enhanced_query,
             message_history=[],  # Could implement conversation history
             deps=None
         )
 
         ai_response = result.output
+        logger.info(f"AI response received, length: {len(ai_response)}")
         response_time = time.time() - start_time
 
         # Check for handoff
