@@ -4,12 +4,14 @@ A multi-tenant API that enables organizations to create knowledge bases from upl
 
 ## Features
 
-### Phase 1 (MVP)
+### Phase 1 (MVP) ✅
 - **Multi-Tenant Architecture**: Organizations can create accounts and manage users
 - **Authentication**: Supabase auth with email/password and OAuth (Google/GitHub)
+- **API Key Management**: Secure API keys with knowledge base associations
 - **Knowledge Base Management**: Create and manage knowledge bases per organization
 - **ETL Pipeline**: Upload files (PDF, DOCX, etc.) and URLs, automatic extraction and vectorization
-- **AI Querying**: Natural language queries with RAG using Google Gemini AI
+- **AI Querying**: Natural language queries with context-aware RAG using Google Gemini AI
+- **Vector Similarity Search**: PostgreSQL pgvector for efficient document retrieval
 - **Human Handoff**: Automatic escalation to support via email when AI can't resolve
 - **Conversation History**: Track user interactions and AI responses
 - **Performance Metrics**: Basic tracking of response times and handoff events
@@ -19,7 +21,7 @@ A multi-tenant API that enables organizations to create knowledge bases from upl
 - **Backend**: FastAPI (Python)
 - **Database**: Supabase PostgreSQL with vector extensions
 - **Storage**: Supabase Storage for files
-- **AI**: Pydantic AI with Google Gemini
+- **AI**: Pydantic AI with Google Gemini (context-aware RAG)
 - **Processing**: Docling for document extraction, OpenLyne for web scraping
 - **Embeddings**: Sentence Transformers (all-MiniLM-L6-v2)
 
@@ -91,9 +93,9 @@ The API will be available at `http://localhost:8000` with docs at `http://localh
 - `DELETE /api/v1/kbs/{kb_id}` - Delete knowledge base (admin only)
 
 ### Upload & Processing (at `/api/v1`)
-- `POST /api/v1/kbs/{kb_id}/upload` - Upload files and URLs for processing
-- `GET /api/v1/upload/status/{batch_id}` - Check upload processing status
-- `GET /api/v1/kbs/{kb_id}/files` - List all files in knowledge base
+- `POST /api/v1/upload` - Upload files and URLs for processing (uses API key KB association)
+- `GET /api/v1/upload/status` - Check upload processing status
+- `GET /api/v1/files` - List all files in knowledge base
 
 ### Querying & Conversations (at `/api/v1`)
 - `POST /api/v1/query` - Query knowledge base with AI agent
@@ -212,16 +214,16 @@ curl -X DELETE "http://localhost:8000/api/v1/kbs/456e7890-e89b-12d3-a456-4266141
 
 #### Upload Files
 ```bash
-curl -X POST "http://localhost:8000/api/v1/kbs/456e7890-e89b-12d3-a456-426614174001/upload" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+curl -X POST "http://localhost:8000/api/v1/upload" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -F "files=@document.pdf" \
   -F "files=@manual.docx"
 ```
 
 #### Upload URLs
 ```bash
-curl -X POST "http://localhost:8000/api/v1/kbs/456e7890-e89b-12d3-a456-426614174001/upload" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+curl -X POST "http://localhost:8000/api/v1/upload" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "urls": [
@@ -233,14 +235,14 @@ curl -X POST "http://localhost:8000/api/v1/kbs/456e7890-e89b-12d3-a456-426614174
 
 #### Check Upload Status
 ```bash
-curl -X GET "http://localhost:8000/api/v1/upload/status/789e0123-e89b-12d3-a456-426614174002" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+curl -X GET "http://localhost:8000/api/v1/upload/status" \
+  -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
 #### List Knowledge Base Files
 ```bash
-curl -X GET "http://localhost:8000/api/v1/kbs/456e7890-e89b-12d3-a456-426614174001/files" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+curl -X GET "http://localhost:8000/api/v1/files" \
+  -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
 ### Querying & Conversations
@@ -248,14 +250,16 @@ curl -X GET "http://localhost:8000/api/v1/kbs/456e7890-e89b-12d3-a456-4266141740
 #### Query Knowledge Base
 ```bash
 curl -X POST "http://localhost:8000/api/v1/query" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "query": "How do I reset my password?",
-    "kb_id": "456e7890-e89b-12d3-a456-426614174001",
+    "kb_id": "456e7890-e89b-12d3-a456-426614174001",  // optional - uses API key association if omitted
     "conversation_id": "conv_123"  // optional, for continuing conversations
   }'
 ```
+
+**Note**: `kb_id` is now optional. If not provided, the API will automatically use the knowledge base associated with your API key.
 
 #### List Conversations
 ```bash
