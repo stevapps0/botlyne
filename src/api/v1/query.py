@@ -12,12 +12,14 @@ from src.archive.agent import agent
 logger = logging.getLogger(__name__)
 
 from src.core.database import supabase
+from src.core.config import settings
 
 # Pydantic models for dependencies
 class TokenData(BaseModel):
-    user_id: str
+    user_id: str | None = None
     org_id: str | None = None
     kb_id: str | None = None
+    api_key_id: str | None = None
 
 # Dependency to get current user
 async def get_current_user(authorization: str = Header(None, alias="Authorization")):
@@ -37,7 +39,7 @@ async def get_current_user(authorization: str = Header(None, alias="Authorizatio
                     logger.info(f"Testing key with shortcode: {derived_shortcode}")
 
                     # Use the verify_api_key database function
-                    result = supabase.rpc("verify_api_key", {"api_key": api_key}).execute()
+                    result = supabase.rpc("verify_api_key", {"p_plain_key": api_key}).execute()
 
                     logger.info(f"Verification result: {result.data}")
 
@@ -45,13 +47,18 @@ async def get_current_user(authorization: str = Header(None, alias="Authorizatio
                         key_info = result.data[0]
                         logger.info(f"Valid key found: org_id = {key_info.get('org_id')}")
 
-                        # Update last_used_at
-                        supabase.rpc("update_key_last_used", {"key_id": key_info["id"]}).execute()
+                        # Update last_used_at (optional - skip if function not available)
+                        try:
+                            supabase.rpc("update_key_last_used", {"key_id": key_info.get("id")}).execute()
+                        except Exception:
+                            pass  # Function may not exist in database
 
+                        # Return org/kb info and api_key id; no user context for API keys
                         return TokenData(
-                            user_id="api_key_user",
-                            org_id=key_info.get("org_id"),
-                            kb_id=None  # kb_id not returned by verify_api_key function
+                            user_id=None,
+                            org_id=key_info.get('org_id'),
+                            kb_id=key_info.get('kb_id'),
+                            api_key_id=key_info.get('id')
                         )
                     else:
                         logger.warning("Key not valid or kb_id is null")
@@ -92,6 +99,7 @@ router = APIRouter()
 # Pydantic models
 class QueryRequest(BaseModel):
     query: str
+    kb_id: Optional[str] = None  # Optional, will use API key's associated KB if not provided
     conversation_id: Optional[str] = None  # For continuing conversations
 
 class QueryResponse(BaseModel):
@@ -170,29 +178,46 @@ async def query_knowledge_base(
     start_time = time.time()
 
     try:
-        # Use KB from API key if not specified in request
-        kb_id = data.kb_id if hasattr(data, 'kb_id') and data.kb_id else current_user.kb_id
+        # Use KB from request or API key association
+        kb_id = data.kb_id or current_user.kb_id
 
         if not kb_id:
-            raise HTTPException(status_code=400, detail="No knowledge base specified")
+            raise HTTPException(status_code=400, detail="No knowledge base specified. Either provide kb_id in request or ensure API key is associated with a knowledge base")
 
         # Verify KB access
         kb_check = supabase.table("knowledge_bases").select("org_id").eq("id", kb_id).single().execute()
         if not kb_check.data or kb_check.data["org_id"] != current_user.org_id:
             raise HTTPException(status_code=403, detail="Access denied")
 
+        # Resolve an effective user id for the conversation (API keys are system-level)
+        effective_user_id = current_user.user_id
+        if not effective_user_id and current_user.api_key_id:
+            # Try to attribute to the API key creator
+            key_row = supabase.table("api_keys").select("created_by").eq("id", current_user.api_key_id).single().execute()
+            if key_row.data and key_row.data.get("created_by"):
+                effective_user_id = key_row.data.get("created_by")
+
+        # Fallback: any user in the org
+        if not effective_user_id and current_user.org_id:
+            org_user = supabase.table("users").select("id").eq("org_id", current_user.org_id).limit(1).execute()
+            if org_user.data and len(org_user.data) > 0:
+                effective_user_id = org_user.data[0]["id"]
+
+        if not effective_user_id:
+            raise HTTPException(status_code=403, detail="No user available for conversation attribution")
+
         # Get or create conversation
         conversation_id = data.conversation_id
         if not conversation_id:
             conv_result = supabase.table("conversations").insert({
-                "user_id": current_user.user_id,
+                "user_id": effective_user_id,
                 "kb_id": kb_id
             }).execute()
             conversation_id = conv_result.data[0]["id"]
         else:
             # Verify conversation ownership
             conv_check = supabase.table("conversations").select("user_id").eq("id", conversation_id).single().execute()
-            if not conv_check.data or conv_check.data["user_id"] != current_user.user_id:
+            if not conv_check.data or conv_check.data["user_id"] != effective_user_id:
                 raise HTTPException(status_code=403, detail="Access denied")
 
         # Retrieve similar documents

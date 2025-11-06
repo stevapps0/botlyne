@@ -56,13 +56,16 @@ async def get_current_user(token: str = Depends(lambda: None)):
                     derived_shortcode = api_key[-6:]
 
                     # Use the verify_api_key database function
-                    result = supabase.rpc("verify_api_key", {"api_key": api_key}).execute()
+                    result = supabase.rpc("verify_api_key", {"p_plain_key": api_key}).execute()
 
                     if result.data and len(result.data) > 0:
                         key_info = result.data[0]
 
-                        # Update last_used_at
-                        supabase.rpc("update_key_last_used", {"key_id": key_info["id"]}).execute()
+                        # Update last_used_at (optional - skip if function not available)
+                        try:
+                            supabase.rpc("update_key_last_used", {"key_id": key_info["id"]}).execute()
+                        except Exception:
+                            pass  # Function may not exist in database
 
                         return TokenData(
                             user_id="api_key_user",
