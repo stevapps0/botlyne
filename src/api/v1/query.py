@@ -221,7 +221,9 @@ async def query_knowledge_base(
                 raise HTTPException(status_code=403, detail="Access denied")
 
         # Retrieve similar documents
+        logger.info(f"Querying KB {kb_id} for: '{data.query}'")
         similar_docs = retrieve_similar(data.query, kb_id=kb_id, limit=5, table_name="documents")
+        logger.info(f"Found {len(similar_docs)} similar documents")
 
         # Format context for agent
         context = ""
@@ -231,6 +233,7 @@ async def query_knowledge_base(
             content = doc.get("content", "")
             metadata = doc.get("metadata", {})
 
+            logger.info(f"Document similarity: {similarity:.3f}, content preview: {content[:100]}...")
             context += f"\n[Source] (Similarity: {similarity:.2%})\n{content}\n"
             sources.append({
                 "content": content[:200] + "..." if len(content) > 200 else content,
@@ -239,6 +242,10 @@ async def query_knowledge_base(
             })
 
         # Generate AI response
+        if not context.strip():
+            logger.warning("No context found from knowledge base - empty results")
+            context = "No relevant information found in the knowledge base."
+
         system_prompt = f"""You are a helpful AI assistant answering questions based on the provided knowledge base context.
 
 Context from knowledge base:

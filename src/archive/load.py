@@ -24,11 +24,17 @@ def search_similar(query: str, kb_id: str, limit: int = 5, table_name: str = "do
     """Search for similar documents using vector similarity."""
     from .transform import get_embedding
 
+    print(f"DEBUG: Searching for query: '{query}' in KB: {kb_id}")
+
     query_embedding = get_embedding(query)
     if query_embedding is None:
+        print("DEBUG: Failed to get query embedding")
         return []
 
+    print(f"DEBUG: Got query embedding, length: {len(query_embedding)}")
+
     try:
+        print(f"DEBUG: Calling match_documents RPC with kb_id: {kb_id}, limit: {limit}")
         result = supabase.rpc(
             "match_documents",
             {
@@ -37,6 +43,10 @@ def search_similar(query: str, kb_id: str, limit: int = 5, table_name: str = "do
                 "match_count": limit
             }
         ).execute()
+        print(f"DEBUG: RPC returned {len(result.data) if result.data else 0} results")
+        if result.data:
+            for i, doc in enumerate(result.data):
+                print(f"DEBUG: Result {i+1}: similarity={doc.get('similarity', 'N/A')}, content_preview='{doc.get('content', '')[:100]}...'")
         return result.data
     except Exception as e:
         print(f"Error searching: {e}")

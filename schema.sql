@@ -1810,10 +1810,31 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 AS $$
 BEGIN
-  UPDATE public.api_keys
-  SET last_used_at = now()
-  WHERE id = key_id;
+   UPDATE public.api_keys
+   SET last_used_at = now()
+   WHERE id = key_id;
 END;
+$$;
+
+-- Create match_documents function for vector similarity search
+CREATE OR REPLACE FUNCTION public.match_documents(
+    query_embedding vector(384),
+    kb_id uuid,
+    match_count integer DEFAULT 5
+)
+RETURNS TABLE(id uuid, content text, metadata jsonb, similarity float)
+LANGUAGE sql
+SECURITY DEFINER
+AS $$
+    SELECT
+        d.id,
+        d.content,
+        d.metadata,
+        (1 - (d.embedding <=> query_embedding))::float AS similarity
+    FROM documents d
+    WHERE d.kb_id = match_documents.kb_id
+    ORDER BY d.embedding <=> query_embedding
+    LIMIT match_count;
 $$;
 
 
