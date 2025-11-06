@@ -19,9 +19,10 @@ from src.core.config import settings
 
 # Pydantic models for dependencies
 class TokenData(BaseModel):
-    user_id: str
+    user_id: str | None = None
     org_id: str | None = None
     kb_id: str | None = None  # Add kb_id to token data
+    api_key_id: str | None = None  # If request authenticated via API key, include the key id
 
 # Dependency to get current user
 async def get_current_user(authorization: str = Header(None, alias="Authorization")):
@@ -48,10 +49,12 @@ async def get_current_user(authorization: str = Header(None, alias="Authorizatio
                         key_info = verification_result.data[0]
                         logger.info(f"Valid key found: org_id = {key_info.get('org_id')}")
 
+                        # When using API keys there is no user context; return the org and key id
                         return TokenData(
-                            user_id="api_key_user",
+                            user_id=None,
                             org_id=key_info.get("org_id"),
-                            kb_id=key_info.get("kb_id")
+                            kb_id=key_info.get("kb_id"),
+                            api_key_id=key_info.get("id")
                         )
                     else:
                         logger.warning("Key not valid or kb_id is null")
@@ -142,7 +145,7 @@ async def process_batch_async(batch_id: str, kb_id: str, files_data: List[dict],
         for file_data in files_data:
             try:
                 # Extract content
-                processed = await ItemProcessor.process(file_data, str(uuid.uuid4()))
+                processed = await ItemProcessor.process((file_data["filename"], file_data["content"]), str(uuid.uuid4()))
                 if processed.status == "success":
                     # Transform and load
                     vectorized_data = vectorize_and_chunk(processed.content, {"source": file_data["filename"]})
@@ -220,14 +223,44 @@ async def upload_knowledge(
             raise HTTPException(status_code=400, detail="API key must be associated with a knowledge base")
         background_tasks.add_task(process_batch_async, batch_id, current_user.kb_id, files_data, urls_list)
 
-        # Record files in database
+        # Resolve a valid uploader user id to satisfy DB FK on files.uploaded_by
+        uploader_id = None
+        try:
+            # If authenticated via API key, prefer the api_keys.created_by as the uploader
+            if current_user.api_key_id:
+                key_row = supabase.table("api_keys").select("created_by").eq("id", current_user.api_key_id).single().execute()
+                if key_row.data and key_row.data.get("created_by"):
+                    uploader_id = key_row.data.get("created_by")
+
+            # If we still don't have an uploader, check if a user_id was provided (user-scoped token)
+            if not uploader_id and current_user.user_id:
+                user_check = supabase.table("users").select("id").eq("id", current_user.user_id).single().execute()
+                if user_check.data:
+                    uploader_id = current_user.user_id
+
+            # Fallback: pick any user in the same org (admin/owner) to attribute the upload to
+            if not uploader_id and current_user.org_id:
+                org_user = supabase.table("users").select("id").eq("org_id", current_user.org_id).limit(1).execute()
+                if org_user.data and len(org_user.data) > 0:
+                    uploader_id = org_user.data[0]["id"]
+
+            if not uploader_id:
+                # No suitable user found — require a user-scoped token / association
+                raise HTTPException(status_code=400, detail="API key is not associated with a valid user in this organization. Please associate a user or use a user token.")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to resolve uploader user: {e}")
+            raise HTTPException(status_code=500, detail="Failed to resolve uploader user")
+
+        # Record files in database using resolved uploader_id
         for file_data in files_data:
             file_record = {
                 "kb_id": current_user.kb_id,
                 "filename": file_data["filename"],
                 "file_type": file_data["filename"].split(".")[-1] if "." in file_data["filename"] else "unknown",
                 "size_bytes": len(file_data["content"]),
-                "uploaded_by": current_user.user_id
+                "uploaded_by": uploader_id
             }
             supabase.table("files").insert(file_record).execute()
 
@@ -237,7 +270,7 @@ async def upload_knowledge(
                 "filename": url,
                 "url": url,
                 "file_type": "url",
-                "uploaded_by": current_user.user_id
+                "uploaded_by": uploader_id
             }
             supabase.table("files").insert(file_record).execute()
 

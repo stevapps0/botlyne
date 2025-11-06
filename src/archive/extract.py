@@ -27,12 +27,12 @@ class ProcessedItem:
     def __init__(self, id: str, content: str = "", metadata: dict = None, source: str = "",
                  source_type: SourceType = SourceType.FILE, content_type: ContentType = ContentType.DOCUMENT,
                  processor: str = "", status: ProcessingStatus = ProcessingStatus.FAILED,
-                 error: str = None, processed_at: str = None):
+                 error: str = None, processed_at: str = None, title: str = None, raw_response: dict = None):
         self.id = id
-        self.title = None
+        self.title = title
         self.content = content
         self.metadata = metadata or {}
-        self.raw_response = None
+        self.raw_response = raw_response
         self.source = source
         self.source_type = source_type
         self.content_type = content_type
