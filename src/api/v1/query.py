@@ -51,6 +51,7 @@ class QueryResponse(BaseModel):
     sources: List[dict]
     response_time: float
     handoff_triggered: bool = False
+    ticket_number: Optional[str] = None
 
 class ConversationResponse(BaseModel):
     id: str
@@ -59,6 +60,7 @@ class ConversationResponse(BaseModel):
     status: str
     started_at: str
     resolved_at: Optional[str] = None
+    ticket_number: Optional[str] = None
 
 def detect_handoff_intent(response: str, query: str) -> bool:
     """Simple heuristic to detect if human handoff is needed"""
@@ -151,9 +153,12 @@ async def query_knowledge_base(
         # Get or create conversation
         conversation_id = data.conversation_id
         if not conversation_id:
+            # Generate unique ticket number (6-character alphanumeric)
+            ticket_number = ''.join(secrets.choice('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ') for _ in range(6))
             conv_result = supabase.table("conversations").insert({
                 "user_id": effective_user_id,
-                "kb_id": kb_id
+                "kb_id": kb_id,
+                "ticket_number": ticket_number
             }).execute()
             conversation_id = conv_result.data[0]["id"]
         else:
@@ -243,13 +248,18 @@ If the context doesn't contain relevant information to answer the question, plea
             # Send handoff email
             await send_handoff_email(conversation_id, data.query, context)
 
+        # Get ticket number for response
+        conv_data = supabase.table("conversations").select("ticket_number").eq("id", conversation_id).single().execute()
+        ticket_number = conv_data.data.get("ticket_number") if conv_data.data else None
+
         return QueryResponse(
             conversation_id=conversation_id,
             user_message=data.query,
             ai_response=ai_response,
             sources=sources,
             response_time=round(response_time, 2),
-            handoff_triggered=handoff_triggered
+            handoff_triggered=handoff_triggered,
+            ticket_number=ticket_number
         )
 
     except HTTPException:
@@ -272,7 +282,8 @@ async def list_conversations(
             kb_id,
             status,
             started_at,
-            resolved_at
+            resolved_at,
+            ticket_number
         """).eq("user_id", current_user.user_id).order("started_at", desc=True).execute()
 
         conversations = []

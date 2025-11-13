@@ -29,9 +29,12 @@ class Settings:
     MAX_FILE_SIZE: int = int(os.getenv("MAX_FILE_SIZE", str(50 * 1024 * 1024)))  # 50MB default
     MAX_PARALLEL_TASKS: int = int(os.getenv("MAX_PARALLEL_TASKS", "10"))
 
+    # Frontend Configuration
+    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:8000")
+
     # Optional OAuth Redirect URLs
-    GOOGLE_REDIRECT_URL: str = os.getenv("GOOGLE_REDIRECT_URL", "http://localhost:3000/auth/callback")
-    GITHUB_REDIRECT_URL: str = os.getenv("GITHUB_REDIRECT_URL", "http://localhost:3000/auth/callback")
+    GOOGLE_REDIRECT_URL: str = os.getenv("GOOGLE_REDIRECT_URL", "http://localhost:8000/auth/callback")
+    GITHUB_REDIRECT_URL: str = os.getenv("GITHUB_REDIRECT_URL", "http://localhost:8000/auth/callback")
 
 
 # Global settings instance

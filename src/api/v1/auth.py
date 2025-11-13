@@ -18,6 +18,18 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+async def get_current_user(authorization: str = Header(None, alias="Authorization")) -> TokenData:
+    """Dependency to get current user from authorization header."""
+    token = authorization.replace("Bearer ", "") if authorization else ""
+    return await validate_bearer_token(token)
+
+async def require_admin(current_user: TokenData = Depends(get_current_user)) -> TokenData:
+    """Ensure user has admin role."""
+    user_data = supabase.table("users").select("role").eq("id", current_user.user_id).single().execute()
+    if user_data.data.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
+
 def hash_api_key(key: str) -> str:
     """Hash API key for storage."""
     return hashlib.sha256(key.encode()).hexdigest()
@@ -29,6 +41,8 @@ def generate_api_key() -> str:
 # Pydantic models for org/user management
 class CreateOrgRequest(BaseModel):
     name: str
+    description: str | None = None
+    team_size: int | None = None
 
 class OrgResponse(BaseModel):
     id: str
@@ -43,17 +57,25 @@ class AddUserRequest(BaseModel):
     email: EmailStr
     role: str = "member"  # admin or member
 
+class InviteUserRequest(BaseModel):
+    email: EmailStr
+    role: str = "member"
+
 class UserResponse(BaseModel):
     id: str
     org_id: str
     role: str
     created_at: str
+    email: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
 
 class UserInfo(BaseModel):
     id: str
     email: str
     org_id: str | None
     role: str | None
+    kb_id: str | None
 
 # Request/Response Models
 class SignUpRequest(BaseModel):
@@ -64,9 +86,6 @@ class SignUpRequest(BaseModel):
 class EmailSignUp(BaseModel):
     email: EmailStr
 
-class EmailPasswordSignIn(BaseModel):
-    email: EmailStr
-    password: str
 
 class OAuthSignInRequest(BaseModel):
     provider: str  # "google" or "github"
@@ -77,14 +96,17 @@ class AuthResponse(BaseModel):
     redirect_url: str | None = None
 
 
-# Enhanced signup: send magic link
-@router.post("/auth/signup", response_model=dict)
-async def email_signup(data: EmailSignUp):
+# Enhanced signin: send magic link
+@router.post("/auth/signin", response_model=dict)
+async def email_signin(data: EmailSignUp):
     """Send magic link for signup/signin"""
     try:
         # Send magic link via Supabase
         auth_response = supabase.auth.sign_in_with_otp({
             "email": data.email,
+            "options": {
+                "redirect_to": f"{settings.FRONTEND_URL}/auth/callback"
+            }
         })
 
         logger.info(f"Magic link sent to: {data.email}")
@@ -100,31 +122,6 @@ async def email_signup(data: EmailSignUp):
             detail=f"Failed to send magic link: {str(e)}"
         )
 
-@router.post("/auth/signin", response_model=dict)
-async def email_password_signin(data: EmailPasswordSignIn):
-    """Sign in with email and password"""
-    try:
-        response = supabase.auth.sign_in_with_password({
-            "email": data.email,
-            "password": data.password,
-        })
-        
-        # Get user org
-        user_record = supabase.table("users").select("org_id").eq("id", response.user.id).single().execute()
-        org_id = user_record.data.get("org_id") if user_record.data else None
-        
-        return {
-            "user": response.user.model_dump(),
-            "session": response.session.model_dump() if response.session else None,
-            "access_token": response.session.access_token if response.session else None,
-            "org_id": org_id,
-        }
-    except Exception as e:
-        logger.error(f"Sign in error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password"
-        )
 
 # OAuth Authentication
 @router.post("/auth/oauth/signin", response_model=dict)
@@ -155,7 +152,7 @@ async def oauth_signin(data: OAuthSignInRequest):
         )
 
 @router.get("/auth/callback")
-async def auth_callback(code: str | None = None, error: str | None = None):
+async def auth_callback(code: str | None = None, error: str | None = None, invite: str | None = None):
     """Handle auth callback from magic link or OAuth"""
     if error:
         raise HTTPException(
@@ -173,20 +170,78 @@ async def auth_callback(code: str | None = None, error: str | None = None):
         response = supabase.auth.exchange_code_for_session({"auth_code": code})
         user = response.user
 
+        # Check for invitation
+        invite_data = None
+        if invite:
+            invite_record = supabase.table("invitations").select("*").eq("id", invite).eq("email", user.email).single().execute()
+            if invite_record.data:
+                invite_data = invite_record.data
+
         # Check if user exists in our users table
         user_record = supabase.table("users").select("*").eq("id", user.id).single().execute()
 
         if not user_record.data:
-            # First time user - create org, user record, and default KB
+            # First time user
             logger.info(f"New user signup: {user.id}, {user.email}")
 
-            # Create organization
-            org_id = str(uuid.uuid4())
-            org_name = f"{user.email.split('@')[0]}'s Organization"
-            org_result = supabase.table("organizations").insert({
-                "id": org_id,
-                "name": org_name,
-            }).execute()
+            if invite_data:
+                # User is accepting an invitation
+                org_id = invite_data["org_id"]
+                role = invite_data["role"]
+
+                # Get org name
+                org_record = supabase.table("organizations").select("name").eq("id", org_id).single().execute()
+                org_name = org_record.data["name"] if org_record.data else "Organization"
+
+                # Create user record in invited org
+                user_result = supabase.table("users").insert({
+                    "id": user.id,
+                    "email": user.email,
+                    "org_id": org_id,
+                    "role": role
+                }).execute()
+
+                logger.info(f"User record created: {user.id} in invited org {org_id}")
+
+                # Get or create KB for the org (assume org has at least one KB)
+                kb_record = supabase.table("knowledge_bases").select("id").eq("org_id", org_id).limit(1).execute()
+                kb_id = kb_record.data[0]["id"] if kb_record.data else None
+
+                # Delete the invitation
+                supabase.table("invitations").delete().eq("id", invite).execute()
+
+                # Send welcome email for invited user
+                try:
+                    email_data = {
+                        "to": user.email,
+                        "subject": f"Welcome to {org_name}!",
+                        "org_name": org_name,
+                        "dashboard_url": f"{settings.FRONTEND_URL}/dashboard"
+                    }
+                    supabase.rpc('send_invited_user_welcome_email', email_data).execute()
+                    logger.info(f"Welcome email sent to invited user {user.email}")
+                except Exception as e:
+                    logger.error(f"Failed to send welcome email: {e}")
+
+                return {
+                    "user": user.model_dump(),
+                    "session": response.session.model_dump() if response.session else None,
+                    "access_token": response.session.access_token if response.session else None,
+                    "org_id": org_id,
+                    "kb_id": kb_id,
+                    "message": f"Welcome to {org_name}! You have been successfully added to the organization."
+                }
+            else:
+                # Regular signup - create org, user record, and default KB
+                # Create organization
+                org_id = str(uuid.uuid4())
+                org_name = f"{user.email.split('@')[0]}'s Organization"
+                shortcode = secrets.token_hex(3)  # 6-character hex shortcode
+                org_result = supabase.table("organizations").insert({
+                    "id": org_id,
+                    "name": org_name,
+                    "shortcode": shortcode
+                }).execute()
 
             logger.info(f"Organization created: {org_id}")
 
@@ -200,12 +255,13 @@ async def auth_callback(code: str | None = None, error: str | None = None):
 
             logger.info(f"User record created: {user.id} in org {org_id}")
 
-            # Create default knowledge base
+            # Create default knowledge base with org name prefix
             kb_id = str(uuid.uuid4())
+            kb_name = f"{org_name} Knowledge Base"
             kb_result = supabase.table("knowledge_bases").insert({
                 "id": kb_id,
                 "org_id": org_id,
-                "name": "My Knowledge Base",
+                "name": kb_name,
                 "description": "Your first knowledge base - start uploading documents here!",
             }).execute()
 
@@ -339,16 +395,24 @@ async def signout(refresh_token: str):
             detail=str(e)
         )
 
-@router.get("/auth/user")
-async def get_user(access_token: str):
-    """Get current user info"""
+@router.get("/auth/user", response_model=UserInfo)
+async def get_user(current_user: TokenData = Depends(get_current_user)):
+    """Get current user info with org/role/kb"""
     try:
-        response = supabase.auth.get_user(access_token)
-        return {"user": response.user.model_dump()}
+        # Get user details from our table
+        user_data = supabase.table("users").select("*").eq("id", current_user.user_id).single().execute()
+
+        return UserInfo(
+            id=current_user.user_id,
+            email=user_data.data.get("email") if user_data.data else "",
+            org_id=user_data.data.get("org_id") if user_data.data else current_user.org_id,
+            role=user_data.data.get("role") if user_data.data else None,
+            kb_id=current_user.kb_id
+        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid access token"
+            detail="Invalid token or user not found"
         )
 
 # Organization management endpoints
@@ -356,9 +420,15 @@ async def get_user(access_token: str):
 async def create_organization(data: CreateOrgRequest):
     """Create a new organization"""
     try:
+        # Generate 6-character hex shortcode
+        shortcode = secrets.token_hex(3)  # 6 characters
+
         # Create org
         org_data = {
-            "name": data.name
+            "name": data.name,
+            "description": data.description,
+            "team_size": data.team_size,
+            "shortcode": shortcode
         }
         org_result = supabase.table("organizations").insert(org_data).execute()
         org = org_result.data[0]
@@ -388,7 +458,7 @@ async def get_organization(org_id: str):
 async def list_org_users(org_id: str):
     """List all users in an organization"""
     try:
-        result = supabase.table("users").select("*").eq("org_id", org_id).execute()
+        result = supabase.table("users").select("id, org_id, role, created_at, email, first_name, last_name").eq("org_id", org_id).execute()
         return [UserResponse(**user) for user in result.data]
     except Exception as e:
         raise HTTPException(
@@ -397,26 +467,35 @@ async def list_org_users(org_id: str):
         )
 
 @router.post("/orgs/{org_id}/users", response_model=UserResponse)
-async def add_user_to_org(org_id: str, data: AddUserRequest):
+async def add_user_to_org(org_id: str, data: AddUserRequest, current_user: TokenData = Depends(require_admin)):
     """Add a user to an organization (admin only)"""
     try:
-        # For testing purposes, we'll use the user ID from the signup response
-        # In production, you'd want to verify the user exists in auth.users
-        # For now, we'll manually set the user ID from the signup we just did
-        user_id = "cac0bb03-1281-406b-9a9e-19b68ed73581"  # From signup response
+        # Verify the inviting user is admin of the target org
+        if current_user.org_id != org_id:
+            raise HTTPException(status_code=403, detail="You can only invite users to your own organization")
 
-        # Check if user is already in an org
-        existing = supabase.table("users").select("id").eq("id", user_id).execute()
-        if existing.data:
+        # For now, assume user_id is provided (in real implementation, search by email or something)
+        # This is a placeholder - in production, you'd look up user by email
+        user_id = data.email  # Placeholder - should be actual user ID lookup
+
+        # Check if user exists and is not already in an org
+        existing = supabase.table("users").select("org_id").eq("id", user_id).single().execute()
+        if existing.data and existing.data.get("org_id"):
             raise HTTPException(status_code=400, detail="User already belongs to an organization")
 
-        # Add user to org
+        # Add or update user in org
         user_data = {
             "id": user_id,
             "org_id": org_id,
             "role": data.role
         }
-        result = supabase.table("users").insert(user_data).execute()
+        if existing.data:
+            # Update existing user
+            result = supabase.table("users").update(user_data).eq("id", user_id).execute()
+        else:
+            # Insert new user (this assumes user exists in auth.users)
+            result = supabase.table("users").insert(user_data).execute()
+
         return UserResponse(**result.data[0])
     except HTTPException:
         raise
@@ -446,28 +525,112 @@ async def remove_user_from_org(org_id: str, user_id: str):
             detail=f"Failed to remove user: {str(e)}"
         )
 
-@router.get("/me", response_model=UserInfo)
-async def get_current_user_info(access_token: str):
-    """Get current user information including org and role"""
+@router.post("/orgs/{org_id}/invites")
+async def invite_user_to_org(org_id: str, data: InviteUserRequest, current_user: TokenData = Depends(require_admin)):
+    """Send invitation to a user to join the organization (admin only)"""
     try:
-        # Get user from token
-        response = supabase.auth.get_user(access_token)
-        user = response.user
+        # Verify admin belongs to org
+        if current_user.org_id != org_id:
+            raise HTTPException(status_code=403, detail="You can only invite users to your own organization")
 
-        # Get user details from our table
-        user_data = supabase.table("users").select("*").eq("id", user.id).single().execute()
+        # Check if user already exists and belongs to an org
+        existing_user = supabase.table("users").select("org_id").eq("email", data.email).single().execute()
+        if existing_user.data and existing_user.data.get("org_id"):
+            raise HTTPException(status_code=400, detail="User already belongs to an organization")
 
-        return UserInfo(
-            id=user.id,
-            email=user.email,
-            org_id=user_data.data.get("org_id") if user_data.data else None,
-            role=user_data.data.get("role") if user_data.data else None
-        )
+        # Create invitation
+        invite_id = str(uuid.uuid4())
+        invite_data = {
+            "id": invite_id,
+            "org_id": org_id,
+            "email": data.email,
+            "role": data.role,
+            "invited_by": current_user.user_id,
+            "expires_at": (datetime.utcnow() + timedelta(days=7)).isoformat()  # 7 days expiry
+        }
+        supabase.table("invitations").insert(invite_data).execute()
+
+        # Send invitation email
+        invite_link = f"{settings.FRONTEND_URL}/accept-invite/{invite_id}"
+        try:
+            email_data = {
+                "to": data.email,
+                "subject": f"Invitation to join {current_user.org_id} organization",
+                "invite_link": invite_link,
+                "org_id": org_id,
+                "role": data.role
+            }
+            supabase.rpc('send_invite_email', email_data).execute()
+        except Exception as e:
+            logger.error(f"Failed to send invite email: {e}")
+            # Don't fail the invite if email fails
+
+        return {"message": "Invitation sent successfully", "invite_id": invite_id}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token or user not found"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to send invitation: {str(e)}"
         )
+
+@router.post("/accept-invite/{invite_id}")
+async def accept_invitation(invite_id: str):
+    """Accept an invitation and sign up/sign in"""
+    try:
+        # Get invitation
+        invite = supabase.table("invitations").select("*").eq("id", invite_id).single().execute()
+        if not invite.data:
+            raise HTTPException(status_code=404, detail="Invitation not found")
+
+        invite_data = invite.data
+        if datetime.fromisoformat(invite_data["expires_at"].replace('Z', '+00:00')) < datetime.utcnow():
+            raise HTTPException(status_code=400, detail="Invitation has expired")
+
+        # Redirect to signup with invite context
+        signup_url = f"{settings.FRONTEND_URL}/signup?invite={invite_id}"
+        return {"redirect_url": signup_url, "org_id": invite_data["org_id"], "role": invite_data["role"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to accept invitation: {str(e)}"
+        )
+
+@router.post("/orgs/{org_id}/leave")
+async def leave_organization(org_id: str, current_user: TokenData = Depends(get_current_user)):
+    """Allow a user to leave their organization"""
+    try:
+        # Verify user belongs to org
+        if current_user.org_id != org_id:
+            raise HTTPException(status_code=403, detail="You don't belong to this organization")
+
+        # Check if user is admin
+        user_data = supabase.table("users").select("role").eq("id", current_user.user_id).single().execute()
+        is_admin = user_data.data and user_data.data.get("role") == "admin"
+
+        if is_admin:
+            # Check if there are other admins
+            other_admins = supabase.table("users").select("id").eq("org_id", org_id).eq("role", "admin").neq("id", current_user.user_id).execute()
+            if not other_admins.data or len(other_admins.data) == 0:
+                raise HTTPException(status_code=400, detail="Cannot leave organization: you are the only admin. Transfer admin role first or delete the organization.")
+
+        # Remove user from org (set org_id to null)
+        supabase.table("users").update({"org_id": None}).eq("id", current_user.user_id).execute()
+
+        # Optionally deactivate API keys (or transfer them)
+        # For now, leave them active but they may not work without org context
+
+        return {"message": "Successfully left the organization"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to leave organization: {str(e)}"
+        )
+
 
 @router.get("/onboarding")
 async def get_onboarding_content():
@@ -517,10 +680,6 @@ Welcome aboard!
     }
 
 
-@router.get("/")
-async def root():
-    """Health check"""
-    return {"message": "FastAPI Supabase Auth API is running"}
 
 
 # Knowledge Base management endpoints
@@ -534,12 +693,6 @@ class KBResponse(BaseModel):
     name: str
     description: str
     created_at: str
-
-
-async def get_current_user(authorization: str = Header(None, alias="Authorization")) -> TokenData:
-    """Dependency to get current user from authorization header."""
-    token = authorization.replace("Bearer ", "") if authorization else ""
-    return await validate_bearer_token(token)
 
 
 @router.post("/kb", response_model=KBResponse)

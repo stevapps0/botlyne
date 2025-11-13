@@ -48,14 +48,25 @@ async def validate_bearer_token(token: str) -> TokenData:
             
             if user and user.id:
                 logger.info(f"JWT validated for user: {user.id}")
-                
+
                 # Get org_id from users table
-                user_record = supabase.table("users").select("org_id").eq("id", user.id).single().execute()
-                org_id = user_record.data.get("org_id") if user_record.data else None
-                
+                org_id = None
+                kb_id = None
+                try:
+                    user_record = supabase.table("users").select("org_id").eq("id", user.id).single().execute()
+                    org_id = user_record.data.get("org_id") if user_record.data else None
+
+                    # Get default kb_id for the org
+                    if org_id:
+                        kb_result = supabase.table("kbs").select("id").eq("org_id", org_id).limit(1).execute()
+                        kb_id = kb_result.data[0]["id"] if kb_result.data else None
+                except Exception as e:
+                    logger.warning(f"User {user.id} not found in local users table: {e}")
+
                 return TokenData(
                     user_id=user.id,
                     org_id=org_id,
+                    kb_id=kb_id,
                     email=user.email
                 )
         except Exception as e:
