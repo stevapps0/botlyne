@@ -10,77 +10,26 @@ from datetime import datetime
 from src.archive.extract import ItemProcessor, Config as ExtractConfig
 from src.archive.transform import vectorize_and_chunk
 from src.archive.load import load_to_supabase
+from src.core.auth_utils import TokenData, validate_bearer_token
 
 # Initialize logging
 logger = logging.getLogger(__name__)
 
-from src.core.database import supabase
+from src.core.database import supabase, supabase_storage
 from src.core.config import settings
 
-# Pydantic models for dependencies
-class TokenData(BaseModel):
-    user_id: str | None = None
-    org_id: str | None = None
-    kb_id: str | None = None  # Add kb_id to token data
-    api_key_id: str | None = None  # If request authenticated via API key, include the key id
-
 # Dependency to get current user
-async def get_current_user(authorization: str = Header(None, alias="Authorization")):
+async def get_current_user(authorization: str = Header(None, alias="Authorization")) -> TokenData:
     """Extract and validate user from JWT token or API key."""
     try:
-        logger.info(f"Auth attempt with Authorization header: {authorization[:30]}..." if authorization else "No Authorization header")
-
-        # Check for org API key
-        if authorization and authorization.startswith("Bearer "):
-            api_key = authorization.replace("Bearer ", "")
-            logger.info(f"Extracted API key: {api_key[:15]}...")
-
-            if api_key.startswith("sk-"):
-                # Validate API key using database verify_api_key function
-                try:
-                    logger.info("Validating API key using database function")
-
-                    # Call the database function to verify the key
-                    verification_result = supabase.rpc("verify_api_key", {"p_plain_key": api_key}).execute()
-
-                    logger.info(f"Verification result: {verification_result.data}")
-
-                    if verification_result.data and len(verification_result.data) > 0:
-                        key_info = verification_result.data[0]
-                        logger.info(f"Valid key found: org_id = {key_info.get('org_id')}")
-
-                        # When using API keys there is no user context; return the org and key id
-                        return TokenData(
-                            user_id=None,
-                            org_id=key_info.get("org_id"),
-                            kb_id=key_info.get("kb_id"),
-                            api_key_id=key_info.get("id")
-                        )
-                    else:
-                        logger.warning("Key not valid or kb_id is null")
-                        raise HTTPException(
-                            status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="Invalid API key"
-                        )
-                except HTTPException:
-                    raise
-                except Exception as e:
-                    logger.error(f"Verification error: {e}")
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="API key verification failed"
-                    )
-            else:
-                logger.warning(f"Invalid API key format: {api_key[:15]}...")
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid API key format"
-                )
-
-        # This is a simplified version - in real implementation you'd validate the token
-        # For now, return a mock user
-        logger.warning("No valid Bearer token found, using mock user")
-        return TokenData(user_id="mock_user", org_id="mock_org", kb_id=None)
+        if not authorization:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required"
+            )
+        
+        token = authorization.replace("Bearer ", "")
+        return await validate_bearer_token(token)
     except HTTPException:
         raise
     except Exception as e:
@@ -210,7 +159,8 @@ async def upload_knowledge(
                 content = await file.read()
                 files_data.append({
                     "filename": file.filename,
-                    "content": content
+                    "content": content,
+                    "file": file
                 })
 
         if not files_data and not urls_list:
@@ -255,9 +205,23 @@ async def upload_knowledge(
 
         # Record files in database using resolved uploader_id
         for file_data in files_data:
+            # Upload file to Supabase Storage
+            file_path = f"{current_user.kb_id}/{str(uuid.uuid4())}_{file_data['filename']}"
+            try:
+                supabase_storage.from_("files").upload(
+                    path=file_path,
+                    file=file_data["content"],
+                    file_options={"content-type": file_data["file"].content_type or "application/octet-stream"}
+                )
+                logger.info(f"Uploaded file {file_data['filename']} to storage at {file_path}")
+            except Exception as e:
+                logger.error(f"Failed to upload {file_data['filename']} to storage: {e}")
+                # Continue processing even if storage upload fails
+
             file_record = {
                 "kb_id": current_user.kb_id,
                 "filename": file_data["filename"],
+                "file_path": file_path if 'file_path' in locals() else None,
                 "file_type": file_data["filename"].split(".")[-1] if "." in file_data["filename"] else "unknown",
                 "size_bytes": len(file_data["content"]),
                 "uploaded_by": uploader_id
@@ -345,3 +309,37 @@ async def list_kb_files(current_user: TokenData = Depends(get_current_user)):
             message="Failed to list files",
             error=str(e)
         )
+
+@router.get("/files/{file_id}/download")
+async def download_file(file_id: str, current_user: TokenData = Depends(get_current_user)):
+    """Download a file from storage"""
+    try:
+        if not current_user.kb_id:
+            raise HTTPException(status_code=400, detail="API key must be associated with a knowledge base")
+
+        # Get file record
+        file_result = supabase.table("files").select("*").eq("id", file_id).eq("kb_id", current_user.kb_id).single().execute()
+        if not file_result.data:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        file_data = file_result.data
+        if not file_data.get("file_path"):
+            raise HTTPException(status_code=404, detail="File not available for download")
+
+        # Download from storage
+        response = supabase_storage.from_("files").download(file_data["file_path"])
+
+        from fastapi.responses import StreamingResponse
+        import io
+
+        return StreamingResponse(
+            io.BytesIO(response),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f"attachment; filename={file_data['filename']}"}
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to download file {file_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to download file")

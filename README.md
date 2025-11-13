@@ -1,41 +1,55 @@
 # Knowledge Base AI API
 
-A multi-tenant API that enables organizations to create knowledge bases from uploaded files and URLs, and query them using AI-powered retrieval-augmented generation (RAG).
+A multi-tenant API that enables users to create accounts, organizations, and knowledge bases from uploaded files and URLs, then query them using AI-powered retrieval-augmented generation (RAG). Supports both **JWT authentication** (logged-in users) and **API keys** (programmatic access).
 
 ## Features
 
-### Phase 1 (MVP) ✅
-- **Multi-Tenant Architecture**: Organizations can create accounts and manage users
-- **Authentication**: Supabase auth with email/password and OAuth (Google/GitHub)
-- **API Key Management**: Secure API keys with knowledge base associations
-- **Knowledge Base Management**: Create and manage knowledge bases per organization
-- **ETL Pipeline**: Upload files (PDF, DOCX, etc.) and URLs, automatic extraction and vectorization
-- **AI Querying**: Natural language queries with context-aware RAG using Google Gemini AI
-- **Vector Similarity Search**: PostgreSQL pgvector for efficient document retrieval
-- **Human Handoff**: Automatic escalation to support via email when AI can't resolve
-- **Conversation History**: Track user interactions and AI responses
-- **Performance Metrics**: Basic tracking of response times and handoff events
+### Authentication ✅
+
+- **Supabase Auth**: Email/password and OAuth (Google/GitHub)
+- **JWT Support**: Logged-in users get JWT tokens for seamless API access
+- **API Keys**: Programmatic access with sk-/kb_ prefixed keys
+- **Multi-Auth**: Endpoints support both JWT and API keys
+
+### User Onboarding ✅
+
+- **Sign Up**: Email/password registration with auto-created organization
+- **Sign In**: Email/password login returning JWT token
+- **Organization Management**: Create and manage organizations
+- **Knowledge Bases**: Users can create multiple KBs per org
+
+### Knowledge Base Features ✅
+
+- **Multi-Tenant Architecture**: Organizations manage their own data
+- **Knowledge Base Management**: Create, list, and manage KBs
+- **ETL Pipeline**: Upload files (PDF, DOCX, etc.) and URLs
+- **Document Processing**: Automatic extraction and vectorization
+- **AI Querying**: Natural language RAG with context-aware answers
+- **Vector Similarity Search**: PostgreSQL pgvector for retrieval
+- **Conversation History**: Track interactions and responses
+- **Human Handoff**: Escalation when AI can't resolve
 
 ## Tech Stack
 
 - **Backend**: FastAPI (Python)
-- **Database**: Supabase PostgreSQL with vector extensions
-- **Storage**: Supabase Storage for files
-- **AI**: Pydantic AI with Google Gemini (context-aware RAG)
-- **Processing**: Docling for document extraction, OpenLyne for web scraping
+- **Database**: Supabase PostgreSQL with pgvector
+- **Storage**: Supabase Storage
+- **AI**: Pydantic AI with Google Gemini
+- **Processing**: Docling for extraction, OpenLyne for web scraping
 - **Embeddings**: Sentence Transformers (all-MiniLM-L6-v2)
 
 ## Quick Start
 
 ### Prerequisites
+
 - Python 3.9+
 - Supabase account
 - Google AI API key
-- OpenLyne API key (optional, for web scraping)
 
 ### Installation
 
 1. **Clone and setup**:
+
    ```bash
    git clone <repository>
    cd knowledge-base-api
@@ -44,220 +58,178 @@ A multi-tenant API that enables organizations to create knowledge bases from upl
    ```
 
 2. **Install dependencies**:
+
    ```bash
-   pip install fastapi uvicorn supabase sentence-transformers docling httpx pydantic-ai
+   pip install -r requirements.txt
    ```
 
 3. **Environment setup**:
+
    ```bash
    cp .env.example .env
    # Edit .env with your API keys
    ```
 
 4. **Database setup**:
+
    - Create a Supabase project
-   - Run the SQL in `schema.sql` in your Supabase SQL editor
-   - Enable storage bucket for file uploads
+   - Run `schema.sql` in Supabase SQL editor
+   - Enable storage bucket
 
 5. **Run the API**:
+
    ```bash
    python main.py
    ```
 
-The API will be available at `http://localhost:8000` with docs at `http://localhost:8000/docs`.
+API available at `http://localhost:8000` with docs at `http://localhost:8000/docs`.
+
+## User Flow
+
+```
+1. POST /auth/signup          → Create account + org, get JWT
+2. POST /kb                   → Create KB (JWT auth)
+3. POST /upload               → Upload files/URLs (JWT auth)
+4. POST /query                → Query KB + get answers (JWT auth)
+```
 
 ## API Endpoints
 
-### Authentication (mounted at `/auth`)
-- `POST /auth/signup` - User registration with email/password
-- `POST /auth/signin` - User login with email/password
-- `POST /auth/oauth/signin` - OAuth signin (Google/GitHub)
-- `POST /auth/oauth/callback` - OAuth callback handler
-- `POST /auth/refresh` - Refresh access token
-- `POST /auth/signout` - Sign out user
-- `GET /auth/user` - Get current user info
-- `GET /me` - Get current user profile with org/role
-
-### Organization Management (mounted at `/auth`)
-- `POST /orgs` - Create new organization
-- `GET /orgs/{org_id}` - Get organization details
-- `GET /orgs/{org_id}/users` - List all users in organization
-- `POST /orgs/{org_id}/users` - Add user to organization
-- `DELETE /orgs/{org_id}/users/{user_id}` - Remove user from organization
-
-### Knowledge Bases (at `/api/v1`)
-- `POST /api/v1/orgs/{org_id}/kbs` - Create knowledge base
-- `GET /api/v1/orgs/{org_id}/kbs` - List knowledge bases
-- `GET /api/v1/kbs/{kb_id}` - Get knowledge base details
-- `PUT /api/v1/kbs/{kb_id}` - Update knowledge base name
-- `DELETE /api/v1/kbs/{kb_id}` - Delete knowledge base (admin only)
-
-### Upload & Processing (at `/api/v1`)
-- `POST /api/v1/upload` - Upload files and URLs for processing (uses API key KB association)
-- `GET /api/v1/upload/status` - Check upload processing status
-- `GET /api/v1/files` - List all files in knowledge base
-
-### Querying & Conversations (at `/api/v1`)
-- `POST /api/v1/query` - Query knowledge base with AI agent
-- `GET /api/v1/conversations` - List user's conversation history
-- `POST /api/v1/conversations/{conv_id}/resolve` - Mark conversation as resolved
-
-### Analytics & Metrics (at `/api/v1`)
-- `GET /api/v1/orgs/{org_id}/metrics` - Get organization analytics (admin only)
-
-## API Usage Examples
-
 ### Authentication
 
-#### Sign Up
-```bash
-curl -X POST "http://localhost:8000/auth/signup" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email": "user@company.com",
-    "password": "securepassword123"
-  }'
-```
+- `POST /auth/signup` - Sign up (email, password, org_name) → JWT + org_id
+- `POST /auth/signin` - Sign in (email, password) → JWT + org_id
+- `POST /auth/oauth/signin` - OAuth sign in
+- `POST /auth/oauth/callback` - OAuth callback
+- `POST /auth/refresh` - Refresh JWT
+- `POST /auth/signout` - Sign out
+- `GET /me` - Get current user (JWT)
 
-#### Sign In
-```bash
-curl -X POST "http://localhost:8000/auth/signin" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email": "user@company.com",
-    "password": "securepassword123"
-  }'
-```
+### Knowledge Bases
 
-#### OAuth Sign In (Google)
-```bash
-curl -X POST "http://localhost:8000/auth/oauth/signin" \
-  -H "Content-Type: application/json" \
-  -d '{"provider": "google"}'
-```
-
-#### Get Current User
-```bash
-curl -X GET "http://localhost:8000/me" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
-```
+- `POST /kb` - Create KB (JWT) → KBResponse
+- `GET /kb/{kb_id}` - Get KB details
+- `GET /orgs/{org_id}/kb` - List org KBs
 
 ### Organization Management
 
-#### Create Organization
-```bash
-curl -X POST "http://localhost:8000/orgs" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "My Company"}'
-```
-
-#### Get Organization Details
-```bash
-curl -X GET "http://localhost:8000/orgs/123e4567-e89b-12d3-a456-426614174000" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
-```
-
-#### Add User to Organization
-```bash
-curl -X POST "http://localhost:8000/orgs/123e4567-e89b-12d3-a456-426614174000/users" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email": "newuser@company.com",
-    "role": "member"
-  }'
-```
-
-#### List Organization Users
-```bash
-curl -X GET "http://localhost:8000/orgs/123e4567-e89b-12d3-a456-426614174000/users" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
-```
-
-### Knowledge Base Management
-
-#### Create Knowledge Base
-```bash
-curl -X POST "http://localhost:8000/api/v1/orgs/123e4567-e89b-12d3-a456-426614174000/kbs" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Product Documentation"}'
-```
-
-#### List Knowledge Bases
-```bash
-curl -X GET "http://localhost:8000/api/v1/orgs/123e4567-e89b-12d3-a456-426614174000/kbs" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
-```
-
-#### Get Knowledge Base Details
-```bash
-curl -X GET "http://localhost:8000/api/v1/kbs/456e7890-e89b-12d3-a456-426614174001" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
-```
-
-#### Update Knowledge Base
-```bash
-curl -X PUT "http://localhost:8000/api/v1/kbs/456e7890-e89b-12d3-a456-426614174001" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Updated Documentation"}'
-```
-
-#### Delete Knowledge Base
-```bash
-curl -X DELETE "http://localhost:8000/api/v1/kbs/456e7890-e89b-12d3-a456-426614174001" \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
-```
+- `POST /orgs` - Create organization
+- `GET /orgs/{org_id}` - Get org details
+- `GET /orgs/{org_id}/users` - List users
+- `POST /orgs/{org_id}/users` - Add user
+- `DELETE /orgs/{org_id}/users/{user_id}` - Remove user
 
 ### Upload & Processing
 
-#### Upload Files
-```bash
-curl -X POST "http://localhost:8000/api/v1/upload" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -F "files=@document.pdf" \
-  -F "files=@manual.docx"
+- `POST /api/v1/upload` - Upload files/URLs (JWT or API key)
+- `GET /api/v1/upload/status` - Check status
+- `GET /api/v1/files` - List files
+
+### Querying
+
+- `POST /api/v1/query` - Query KB (JWT or API key) → AI answer + sources
+- `GET /api/v1/conversations` - List conversations
+- `POST /api/v1/conversations/{conv_id}/resolve` - Mark resolved
+
+## Frontend Integration
+
+Use the TypeScript client in `frontend-api-client.ts`:
+
+```typescript
+import { useKnowledgeBaseAPI } from './api-client';
+// Sign up
+const result = await KnowledgeBaseAPI.signup('user@example.com', 'password');
+localStorage.setItem('token', result.session.access_token);
+
+// Initialize API with JWT
+const api = useKnowledgeBaseAPI(result.session.access_token);
+
+// Create KB
+const kb = await api.createKnowledgeBase('My KB', 'Description');
+
+// Upload files
+await api.uploadFiles([file1, file2]);
+
+// Query KB
+const answer = await api.query('What is X?', kb.id);
 ```
 
-#### Upload URLs
-```bash
-curl -X POST "http://localhost:8000/api/v1/upload" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "urls": [
-      "https://docs.example.com/getting-started",
-      "https://docs.example.com/api-reference"
-    ]
-  }'
+See `frontend-api-client.ts` for complete examples and React components.
+
+## Authentication Methods
+
+Both JWT and API keys are supported. Choose based on your use case:
+
+### JWT (For Logged-in Users)
+
+```typescript
+// 1. Sign up or sign in
+const auth = await KnowledgeBaseAPI.signup('user@example.com', 'password');
+const jwt = auth.session.access_token;
+
+// 2. Use JWT in requests
+const api = useKnowledgeBaseAPI(jwt);
 ```
 
-#### Check Upload Status
-```bash
-curl -X GET "http://localhost:8000/api/v1/upload/status" \
-  -H "Authorization: Bearer YOUR_API_KEY"
+**Advantages:**
+- ✅ User-scoped: automatically tied to user's org
+- ✅ Auto-created org on signup
+- ✅ Seamless frontend integration
+- ✅ Secure: no API key storage
+
+### API Keys (For Programmatic Access)
+
+```typescript
+// Use API key (sk-/kb_ prefix)
+const api = useKnowledgeBaseAPI('sk-xxxxx');
 ```
 
-#### List Knowledge Base Files
-```bash
-curl -X GET "http://localhost:8000/api/v1/files" \
-  -H "Authorization: Bearer YOUR_API_KEY"
+**Advantages:**
+- ✅ Server-to-server integrations
+- ✅ External tool access
+- ✅ Can be revoked without affecting users
+- ✅ Fine-grained permissions
+
+## Database Schema
+
+Required tables:
+
+- `organizations` - org metadata
+- `users` - user profiles linked to orgs
+- `knowledge_bases` - KBs linked to orgs
+- `documents` - documents in KBs (with embeddings)
+- `api_keys` - API keys with org/KB association
+- `conversations` - conversation threads
+- `messages` - conversation messages
+
+See `schema.sql` for full schema.
+
+## Error Handling
+
+All endpoints return standard error responses:
+
+```json
+{
+  "detail": "Invalid API key"
+}
 ```
 
-### Querying & Conversations
+Common status codes:
 
-#### Query Knowledge Base
-```bash
-curl -X POST "http://localhost:8000/api/v1/query" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "How do I reset my password?",
-    "kb_id": "456e7890-e89b-12d3-a456-426614174001",  // optional - uses API key association if omitted
-    "conversation_id": "conv_123"  // optional, for continuing conversations
-  }'
-```
+- `200` - Success
+- `400` - Bad request
+- `401` - Unauthorized (invalid token/key)
+- `403` - Forbidden (insufficient permissions)
+- `404` - Not found
+- `500` - Server error
+
+## Contributing
+
+This is an internal project. Please follow the existing patterns.
+
+## License
+
+Proprietary
 
 **Note**: `kb_id` is now optional. If not provided, the API will automatically use the knowledge base associated with your API key.
 

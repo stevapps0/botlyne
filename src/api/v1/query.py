@@ -7,6 +7,7 @@ import logging
 # Import existing modules
 from src.archive.answer import retrieve_similar
 from src.archive.agent import agent
+from src.core.auth_utils import TokenData, validate_bearer_token
 
 # Initialize logging
 logger = logging.getLogger(__name__)
@@ -14,77 +15,18 @@ logger = logging.getLogger(__name__)
 from src.core.database import supabase
 from src.core.config import settings
 
-# Pydantic models for dependencies
-class TokenData(BaseModel):
-    user_id: str | None = None
-    org_id: str | None = None
-    kb_id: str | None = None
-    api_key_id: str | None = None
-
 # Dependency to get current user
-async def get_current_user(authorization: str = Header(None, alias="Authorization")):
+async def get_current_user(authorization: str = Header(None, alias="Authorization")) -> TokenData:
     """Extract and validate user from JWT token or API key."""
     try:
-        logger.info(f"Query auth attempt with Authorization header: {authorization[:30]}..." if authorization else "No Authorization header")
-
-        # Check for org API key
-        if authorization and authorization.startswith("Bearer "):
-            api_key = authorization.replace("Bearer ", "")
-            logger.info(f"Extracted API key: {api_key[:15]}...")
-
-            if api_key.startswith("kb_") or api_key.startswith("sk-"):
-                # Validate API key using database verification function
-                try:
-                    derived_shortcode = api_key[-6:]
-                    logger.info(f"Testing key with shortcode: {derived_shortcode}")
-
-                    # Use the verify_api_key database function
-                    result = supabase.rpc("verify_api_key", {"p_plain_key": api_key}).execute()
-
-                    logger.info(f"Verification result: {result.data}")
-
-                    if result.data and len(result.data) > 0:
-                        key_info = result.data[0]
-                        logger.info(f"Valid key found: org_id = {key_info.get('org_id')}")
-
-                        # Update last_used_at (optional - skip if function not available)
-                        try:
-                            supabase.rpc("update_key_last_used", {"key_id": key_info.get("id")}).execute()
-                        except Exception:
-                            pass  # Function may not exist in database
-
-                        # Return org/kb info and api_key id; no user context for API keys
-                        return TokenData(
-                            user_id=None,
-                            org_id=key_info.get('org_id'),
-                            kb_id=key_info.get('kb_id'),
-                            api_key_id=key_info.get('id')
-                        )
-                    else:
-                        logger.warning("Key not valid or kb_id is null")
-                        raise HTTPException(
-                            status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="Invalid API key"
-                        )
-                except HTTPException:
-                    raise
-                except Exception as e:
-                    logger.error(f"Verification error: {e}")
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="API key verification failed"
-                    )
-            else:
-                logger.warning(f"Invalid API key format: {api_key[:15]}...")
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid API key format"
-                )
-
-        # This is a simplified version - in real implementation you'd validate the token
-        # For now, return a mock user
-        logger.warning("No valid Bearer token found, using mock user")
-        return TokenData(user_id="mock_user", org_id="mock_org", kb_id=None)
+        if not authorization:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required"
+            )
+        
+        token = authorization.replace("Bearer ", "")
+        return await validate_bearer_token(token)
     except HTTPException:
         raise
     except Exception as e:

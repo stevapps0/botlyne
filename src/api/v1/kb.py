@@ -6,129 +6,23 @@ import logging
 from datetime import datetime
 
 from src.core.database import supabase
+from src.core.auth_utils import TokenData, validate_bearer_token
 
 # Import dependencies from main.py
 from src.core.database import supabase as main_supabase
 
-# Pydantic models for dependencies
-class TokenData(BaseModel):
-    user_id: str
-    org_id: str | None = None
-    kb_id: str | None = None
-
 # Dependency to get current user
-async def get_current_user(authorization: str = Header(None, alias="Authorization")):
+async def get_current_user(authorization: str = Header(None, alias="Authorization")) -> TokenData:
     """Extract and validate user from JWT token or API key."""
     try:
-        logger.info(f"KB auth attempt with Authorization header: {authorization[:30]}..." if authorization else "No Authorization header")
-
-        # Check for org API key
-        if authorization and authorization.startswith("Bearer "):
-            api_key = authorization.replace("Bearer ", "")
-            logger.info(f"Extracted API key: {api_key[:15]}...")
-
-            if api_key.startswith("sk-"):
-                # Validate API key using direct hash lookup
-                try:
-                    logger.info("KB: Validating API key using direct hash lookup")
-
-                    # Hash the incoming API key
-                    import hashlib
-                    computed_hash = hashlib.sha256(api_key.encode()).hexdigest()
-                    logger.info(f"KB: Computed hash: {computed_hash[:16]}...")
-
-                    # Look up the API key by hash
-                    key_query = supabase.table("api_keys").select("*").eq("key_hash", computed_hash).eq("is_active", True).execute()
-
-                    logger.info(f"KB: Key lookup result: {len(key_query.data) if key_query.data else 0} records found")
-
-                    if key_query.data:
-                        found_key = key_query.data[0]
-                        logger.info(f"KB: Found key record: id={found_key['id']}, kb_id={found_key.get('kb_id')}")
-
-                        # Check expiration
-                        expires_at = found_key.get("expires_at")
-                        if expires_at:
-                            try:
-                                expiry_dt = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
-                                if expiry_dt < datetime.utcnow():
-                                    logger.warning("KB: API key expired")
-                                    result = type('MockResult', (), {'data': [{'is_valid': False}]})()
-                                else:
-                                    logger.info("KB: API key valid and not expired")
-                                    result = type('MockResult', (), {'data': [{
-                                        'is_valid': True,
-                                        'api_key_id': found_key['id'],
-                                        'org_id': found_key['org_id'],
-                                        'kb_id': found_key['kb_id'],
-                                        'permissions': found_key['permissions']
-                                    }]})()
-                            except Exception as e:
-                                logger.error(f"KB: Error parsing expiration date: {e}")
-                                result = type('MockResult', (), {'data': [{'is_valid': False}]})()
-                        else:
-                            logger.info("KB: API key valid (no expiration)")
-                            result = type('MockResult', (), {'data': [{
-                                'is_valid': True,
-                                'api_key_id': found_key['id'],
-                                'org_id': found_key['org_id'],
-                                'kb_id': found_key['kb_id'],
-                                'permissions': found_key['permissions']
-                            }]})()
-                    else:
-                        logger.warning("KB: No API key found with matching hash")
-                        result = type('MockResult', (), {'data': [{'is_valid': False}]})()
-
-                    if result and result.data and len(result.data) > 0 and result.data[0]["is_valid"]:
-                        key_info = result.data[0]
-                        logger.info(f"KB: Valid key found: kb_id = {key_info.get('kb_id')}, org_id = {key_info.get('org_id')}")
-
-                        # Update last_used_at
-                        supabase.rpc("update_key_last_used", {"key_id": key_info["id"]}).execute()
-
-                        return TokenData(
-                            user_id="api_key_user",
-                            org_id=key_info.get("org_id"),
-                            kb_id=key_info.get("kb_id")
-                        )
-                    else:
-                        logger.warning("KB: Key not valid or kb_id is null")
-                        raise HTTPException(
-                            status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="Invalid API key"
-                        )
-                except HTTPException:
-                    raise
-                except Exception as e:
-                    logger.error(f"KB: Verification error: {e}")
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="API key verification failed"
-                    )
-            else:
-                logger.warning(f"Invalid API key format: {api_key[:15]}...")
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid API key format"
-                )
-
-        # For testing, extract user ID from mock token
-        if authorization and authorization.startswith("Bearer mock-token-"):
-            user_id = authorization.replace("Bearer mock-token-", "")
-            # Get user org from database
-            user_data = supabase.table("users").select("org_id").eq("id", user_id).single().execute()
-            org_id = user_data.data.get("org_id") if user_data.data else None
-            return TokenData(user_id=user_id, org_id=org_id, kb_id="mock_kb")
-        elif authorization and authorization.startswith("mock-token-"):
-            # Handle query parameter style tokens
-            user_id = authorization.replace("mock-token-", "")
-            user_data = supabase.table("users").select("org_id").eq("id", user_id).single().execute()
-            org_id = user_data.data.get("org_id") if user_data.data else None
-            return TokenData(user_id=user_id, org_id=org_id, kb_id="mock_kb")
-        else:
-            # This is a simplified version - in real implementation you'd validate the token
-            logger.warning("No valid Bearer token found, using mock user")
-            return TokenData(user_id="mock_user", org_id="mock_org", kb_id="mock_kb")
+        if not authorization:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required"
+            )
+        
+        token = authorization.replace("Bearer ", "")
+        return await validate_bearer_token(token)
     except HTTPException:
         raise
     except Exception as e:
