@@ -376,10 +376,16 @@ class KBResponse(BaseModel):
     created_at: str
 
 
+async def get_current_user(authorization: str = Header(None, alias="Authorization")) -> TokenData:
+    """Dependency to get current user from authorization header."""
+    token = authorization.replace("Bearer ", "") if authorization else ""
+    return await validate_bearer_token(token)
+
+
 @router.post("/kb", response_model=KBResponse)
 async def create_knowledge_base(
     data: CreateKBRequest,
-    current_user: TokenData = Depends(lambda authorization=Header(None, alias="Authorization"): validate_bearer_token(authorization.replace("Bearer ", "") if authorization else ""))
+    current_user: TokenData = Depends(get_current_user)
 ):
     """Create a new knowledge base in user's organization"""
     try:

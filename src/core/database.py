@@ -2,19 +2,11 @@
 import hashlib
 from datetime import datetime
 from supabase import create_client, Client
-from storage3 import create_client as create_storage_client
 
 from .config import settings
 
 # Initialize Supabase client with application settings
 supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY)
-
-# Initialize Supabase Storage client
-supabase_storage = create_storage_client(
-    url=settings.SUPABASE_URL,
-    key=settings.SUPABASE_ANON_KEY,
-    is_async=False
-)
 
 def sha256_hex(s: str) -> str:
     # ensure the same encoding and hex format as Postgres: lowercase hex

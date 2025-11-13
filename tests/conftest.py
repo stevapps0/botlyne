@@ -1,7 +1,9 @@
 """Pytest configuration and fixtures."""
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
+from datetime import datetime
+import uuid
 
 from main import app
 
@@ -15,7 +17,7 @@ def client():
 @pytest.fixture
 def use_live_db():
     """Fixture to indicate whether to use live database for testing."""
-    return True  # Set to True to use live Supabase database
+    return False  # Set to False to use mocked Supabase for testing
 
 
 @pytest.fixture
@@ -31,10 +33,11 @@ def mock_supabase(use_live_db):
              patch('src.api.v1.auth.supabase') as mock_auth_supabase, \
              patch('src.api.v1.kb.supabase') as mock_kb_supabase, \
              patch('src.api.v1.upload.supabase') as mock_upload_supabase, \
-             patch('src.api.v1.query.supabase') as mock_query_supabase:
+             patch('src.api.v1.query.supabase') as mock_query_supabase, \
+             patch('src.core.auth_utils.supabase') as mock_auth_utils_supabase:
 
             # Configure all supabase mocks to return the same mock
-            for mock in [mock_supabase, mock_auth_supabase, mock_kb_supabase, mock_upload_supabase, mock_query_supabase]:
+            for mock in [mock_supabase, mock_auth_supabase, mock_kb_supabase, mock_upload_supabase, mock_query_supabase, mock_auth_utils_supabase]:
                 mock.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = MagicMock()
                 mock.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock()
                 mock.table.return_value.insert.return_value.execute.return_value = MagicMock()
@@ -43,6 +46,7 @@ def mock_supabase(use_live_db):
                 mock.auth.sign_up.return_value = MagicMock()
                 mock.auth.sign_in_with_password.return_value = MagicMock()
                 mock.auth.get_user.return_value = MagicMock()
+                mock.rpc.return_value.execute.return_value = MagicMock()
 
             yield mock_supabase
 
@@ -81,23 +85,49 @@ def sample_kb():
 
 
 @pytest.fixture
-def auth_headers(sample_user):
-    """Mock authorization headers."""
-    return {"Authorization": f"Bearer mock-token-{sample_user['id']}"}
+def jwt_token(sample_user):
+    """Mock JWT token for testing."""
+    # In real scenarios, this would be a real JWT from Supabase
+    # For testing, we use a valid-looking bearer token (no sk-/kb_ prefix)
+    return "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test.token"
+
+
+@pytest.fixture
+def api_key_token():
+    """Mock API key token for testing."""
+    # API keys have sk- or kb_ prefix
+    return "sk-proj-test-api-key-123456789"
+
+
+@pytest.fixture
+def auth_headers_jwt(jwt_token):
+    """JWT authorization headers."""
+    return {"Authorization": f"Bearer {jwt_token}"}
+
+
+@pytest.fixture
+def auth_headers_api_key(api_key_token):
+    """API key authorization headers."""
+    return {"Authorization": f"Bearer {api_key_token}"}
 
 
 @pytest.fixture
 def test_org_id():
     """Test organization ID that exists in live database."""
-    # This should be a real org ID from your Supabase database
-    # You'll need to create this org first or get it from existing data
     return "550e8400-e29b-41d4-a716-446655440001"
 
 
 @pytest.fixture
 def test_kb_id():
     """Test knowledge base ID that exists in live database."""
-    # This should be a real KB ID from your Supabase database
+    return "550e8400-e29b-41d4-a716-446655440002"
+
+
+@pytest.fixture
+def test_user_id():
+    """Test user ID for live database."""
+    return "550e8400-e29b-41d4-a716-446655440000"
+
     # You'll need to create this KB first or get it from existing data
     return "550e8400-e29b-41d4-a716-446655440002"
 

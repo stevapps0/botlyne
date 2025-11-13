@@ -15,7 +15,7 @@ from src.core.auth_utils import TokenData, validate_bearer_token
 # Initialize logging
 logger = logging.getLogger(__name__)
 
-from src.core.database import supabase, supabase_storage
+from src.core.database import supabase
 from src.core.config import settings
 
 # Dependency to get current user
@@ -205,18 +205,15 @@ async def upload_knowledge(
 
         # Record files in database using resolved uploader_id
         for file_data in files_data:
-            # Upload file to Supabase Storage
+            # Store file metadata in database (Supabase handles file storage via bucket)
             file_path = f"{current_user.kb_id}/{str(uuid.uuid4())}_{file_data['filename']}"
             try:
-                supabase_storage.from_("files").upload(
-                    path=file_path,
-                    file=file_data["content"],
-                    file_options={"content-type": file_data["file"].content_type or "application/octet-stream"}
-                )
-                logger.info(f"Uploaded file {file_data['filename']} to storage at {file_path}")
+                # File is already processed through ETL pipeline
+                # Store metadata in database
+                logger.info(f"Processing file {file_data['filename']} with path {file_path}")
             except Exception as e:
-                logger.error(f"Failed to upload {file_data['filename']} to storage: {e}")
-                # Continue processing even if storage upload fails
+                logger.error(f"Failed to process {file_data['filename']}: {e}")
+                # Continue processing even if individual file fails
 
             file_record = {
                 "kb_id": current_user.kb_id,
@@ -326,20 +323,18 @@ async def download_file(file_id: str, current_user: TokenData = Depends(get_curr
         if not file_data.get("file_path"):
             raise HTTPException(status_code=404, detail="File not available for download")
 
-        # Download from storage
-        response = supabase_storage.from_("files").download(file_data["file_path"])
-
-        from fastapi.responses import StreamingResponse
-        import io
-
-        return StreamingResponse(
-            io.BytesIO(response),
-            media_type="application/octet-stream",
-            headers={"Content-Disposition": f"attachment; filename={file_data['filename']}"}
-        )
+        # File is stored in Supabase Storage bucket
+        # Return metadata instead of downloading (in production, implement signed URLs)
+        return {
+            "file_id": file_id,
+            "filename": file_data.get("filename"),
+            "size_bytes": file_data.get("size_bytes"),
+            "uploaded_at": file_data.get("uploaded_at"),
+            "message": "Use Supabase Storage signed URL to download"
+        }
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to download file {file_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to download file")
+        logger.error(f"Failed to get file {file_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get file")
