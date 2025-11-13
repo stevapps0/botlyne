@@ -4,46 +4,21 @@ from unittest.mock import MagicMock, patch
 from src.core.auth_utils import TokenData
 
 
-def test_email_password_signup(client, mock_supabase):
-    """Test user signup with email and password creates org automatically."""
-    # Mock Supabase auth signup
-    mock_auth_response = MagicMock()
-    mock_user = MagicMock()
-    mock_user.id = "550e8400-e29b-41d4-a716-446655440000"
-    mock_user.email = "tester@openlyne.com"
-    mock_auth_response.user = mock_user
-    mock_auth_response.session = MagicMock(access_token="test-jwt-token")
-    mock_supabase.auth.sign_up.return_value = mock_auth_response
-
-    # Mock org creation
-    mock_org_result = MagicMock()
-    mock_org_result.data = [{
-        "id": "550e8400-e29b-41d4-a716-446655440001",
-        "name": "tester's Workspace"
-    }]
-    mock_supabase.table.return_value.insert.return_value.execute.return_value = mock_org_result
-
-    # Mock user record creation
-    mock_user_result = MagicMock()
-    mock_user_result.data = [{
-        "id": "550e8400-e29b-41d4-a716-446655440000",
-        "org_id": "550e8400-e29b-41d4-a716-446655440001",
-        "email": "tester@openlyne.com",
-        "role": "owner"
-    }]
-    mock_supabase.table.return_value.insert.return_value.execute.return_value = mock_user_result
+def test_email_signup(client, mock_supabase):
+    """Test user signup sends magic link."""
+    # Mock Supabase magic link
+    mock_supabase.auth.sign_in_with_otp.return_value = MagicMock()
 
     response = client.post("/auth/signup", json={
-        "email": "tester@openlyne.com",
-        "password": "Test123!@#"
+        "email": "tester@openlyne.com"
     })
 
     assert response.status_code == 200
     data = response.json()
-    assert "user" in data
-    assert "org_id" in data
-    assert "access_token" in data
-    assert data["user"]["email"] == "tester@openlyne.com"
+    assert "message" in data
+    assert "email" in data
+    assert data["email"] == "tester@openlyne.com"
+    assert "Magic link sent" in data["message"]
 
 
 def test_email_password_signin(client, mock_supabase, sample_user):
@@ -162,8 +137,8 @@ def test_get_organization_kbs(client, mock_supabase, sample_org, sample_kb, jwt_
 def test_missing_auth_header_returns_401(client):
     """Test that missing authorization header returns 401."""
     response = client.post("/kb", json={"name": "Test KB"})
-    
-    assert response.status_code == 403  # No auth header provided
+
+    assert response.status_code == 401  # No auth header provided
 
 
 def test_invalid_jwt_returns_401(client, mock_supabase):

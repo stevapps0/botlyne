@@ -1,8 +1,8 @@
-# User Onboarding Flow - Implementation Summary
+# Seamless User Onboarding - Implementation Summary
 
 ## Overview
 
-Users can now complete the full flow: **signup → create org → create KB → upload/ETL → query & get answers**.
+Users can now complete the full flow with **one-click signup**: **email → magic link → instant account with org, KB, API key, and welcome content**.
 
 **Authentication:** All endpoints support both:
 - **JWT tokens** (from authenticated users - no prefix)
@@ -31,36 +31,36 @@ validate_bearer_token() in auth_utils.py
 
 ## Changes Made
 
-### 1. JWT & API Key Authentication ✅
+### 1. Magic Link Authentication ✅
 
-**File:** `src/core/auth_utils.py` (NEW)
+**File:** `src/api/v1/auth.py`
 
-- Centralized token validation (JWT or API key)
-- Detects token type: JWT (no prefix) vs API key (sk-/kb_ prefix)
-- JWT validates via Supabase, fails immediately if invalid
-- API key validates against database
-- Returns `TokenData` with user/org/kb info
+- Replaced password-based signup with magic link authentication
+- Uses `supabase.auth.sign_in_with_otp()` for passwordless signup
+- Unified callback handles both magic links and OAuth
+- Auto-creates user, organization, knowledge base, and API key on first signup
 
-**Updated Files:**
-- `src/api/v1/kb.py` - Uses centralized JWT/API key validation
-- `src/api/v1/query.py` - Uses centralized JWT/API key validation
-- `src/api/v1/upload.py` - Uses centralized JWT/API key validation
+### 2. Seamless Onboarding ✅
 
-### 2. User Account Creation ✅
-**Endpoint:** `POST /auth/signup`
-**Input:**
-```json
-{
-  "email": "user@example.com",
-  "password": "secure_password",
-  "organization_name": "My Company"
-}
-```
-**Behavior:**
-- Creates Supabase auth user
-- Auto-creates organization
-- Creates user record linked to org
-- Returns JWT token + org_id
+**Auto-created on signup:**
+- User account in Supabase Auth
+- Organization with personalized name
+- Default knowledge base ("My Knowledge Base")
+- API key associated with the KB
+- Welcome content uploaded to KB for immediate querying
+
+**New Endpoints:**
+- `POST /auth/signup` - Magic link signup (email only)
+- `GET /auth/callback` - Auto-setup callback for new users
+- `GET /onboarding` - Welcome content and tutorial steps
+
+### 3. Welcome Email Integration ✅
+
+**File:** `src/api/v1/auth.py`
+
+- Custom SMTP emails via Supabase Edge Function
+- Includes API key, dashboard link, and onboarding instructions
+- Non-blocking - signup succeeds even if email fails
 
 ### 3. Sign In ✅
 **Endpoint:** `POST /auth/signin`
@@ -121,40 +121,37 @@ validate_bearer_token() in auth_utils.py
 
 ## Frontend Integration
 
-### 1. Sign Up & Get Token
+### 1. Magic Link Signup
 ```typescript
+// Send magic link
 const response = await fetch('http://localhost:8000/auth/signup', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
-    email: 'user@example.com',
-    password: 'password',
-    organization_name: 'My Org'
+    email: 'user@example.com'
   })
 });
 
-const { session, org_id } = await response.json();
-localStorage.setItem('token', session.access_token);
-localStorage.setItem('org_id', org_id);
+// User receives email and clicks magic link
+// Redirects to your app with auth code
 ```
 
-### 2. Create Knowledge Base
+### 2. Handle Auth Callback
 ```typescript
-const token = localStorage.getItem('token');
-const response = await fetch('http://localhost:8000/kb', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${token}`
-  },
-  body: JSON.stringify({
-    name: 'My KB',
-    description: 'My knowledge base'
-  })
-});
+// After user clicks magic link, handle callback
+const urlParams = new URLSearchParams(window.location.search);
+const code = urlParams.get('code');
 
-const { id: kb_id } = await response.json();
+const response = await fetch(`http://localhost:8000/auth/callback?code=${code}`);
+const { session, org_id, kb_id, api_key } = await response.json();
+
+// Store credentials
+localStorage.setItem('token', session.access_token);
+localStorage.setItem('org_id', org_id);
 localStorage.setItem('kb_id', kb_id);
+localStorage.setItem('api_key', api_key);
+
+// Account is fully set up - user can immediately upload/query
 ```
 
 ### 3. Upload Documents
@@ -202,9 +199,9 @@ Ensure these tables exist:
 ## Testing Flow
 
 ```
-1. POST /auth/signup → Get JWT + org_id
-2. POST /kb → Create KB with JWT
-3. POST /api/v1/upload → Upload files with JWT
+1. POST /auth/signup → Send magic link email
+2. GET /auth/callback?code=xxx → Auto-create account + return JWT + org_id + kb_id + api_key
+3. POST /api/v1/upload → Upload files with JWT (KB auto-selected)
 4. POST /api/v1/query → Query KB with JWT
 5. Verify responses include sources + answers
 ```
@@ -213,9 +210,9 @@ Ensure these tables exist:
 
 | Feature | JWT | API Key |
 |---------|-----|---------|
-| User signup | ✅ | ❌ |
-| Auto org creation | ✅ | ❌ |
-| KB creation | ✅ | ❌ |
+| Magic link signup | ✅ | ❌ |
+| Auto org/KB/API key creation | ✅ | ❌ |
+| Welcome content & emails | ✅ | ❌ |
 | Upload files | ✅ | ✅ |
 | Query KB | ✅ | ✅ |
 | Server-to-server | ❌ | ✅ |
@@ -224,9 +221,10 @@ Ensure these tables exist:
 
 ## Summary
 
-✅ **Complete user flow implemented**
-- Users can create accounts with auto org creation
-- JWT auth for authenticated users
-- API keys for programmatic access
-- ETL pipeline works with both auth methods
-- Query/answers work with both auth methods
+✅ **Seamless one-click onboarding implemented**
+- Magic link signup creates full account instantly
+- Auto-provisioned: user, organization, knowledge base, API key
+- Welcome content uploaded for immediate querying
+- Custom welcome emails with credentials
+- Passwordless authentication with Supabase
+- Works with both JWT and API key authentication

@@ -6,15 +6,17 @@ A multi-tenant API that enables users to create accounts, organizations, and kno
 
 ### Authentication ✅
 
-- **Supabase Auth**: Email/password and OAuth (Google/GitHub)
+- **Magic Link Authentication**: Passwordless signup/signin via email
+- **Supabase Auth**: Email magic links and OAuth (Google/GitHub)
 - **JWT Support**: Logged-in users get JWT tokens for seamless API access
 - **API Keys**: Programmatic access with sk-/kb_ prefixed keys
 - **Multi-Auth**: Endpoints support both JWT and API keys
 
 ### User Onboarding ✅
 
-- **Sign Up**: Email/password registration with auto-created organization
-- **Sign In**: Email/password login returning JWT token
+- **Magic Link Signup**: Passwordless registration with auto-created organization, KB, and API key
+- **Seamless Setup**: One-click signup creates full account with welcome content
+- **Welcome Emails**: Custom SMTP emails with API key and dashboard links
 - **Organization Management**: Create and manage organizations
 - **Knowledge Bases**: Users can create multiple KBs per org
 
@@ -87,23 +89,23 @@ API available at `http://localhost:8000` with docs at `http://localhost:8000/doc
 ## User Flow
 
 ```
-1. POST /auth/signup          → Create account + org, get JWT
-2. POST /kb                   → Create KB (JWT auth)
-3. POST /upload               → Upload files/URLs (JWT auth)
-4. POST /query                → Query KB + get answers (JWT auth)
+1. POST /auth/signup          → Send magic link email
+2. User clicks magic link     → Auto-create account + org + KB + API key
+3. POST /upload               → Upload files/URLs (JWT or API key)
+4. POST /query                → Query KB + get answers (JWT or API key)
 ```
 
 ## API Endpoints
 
 ### Authentication
 
-- `POST /auth/signup` - Sign up (email, password, org_name) → JWT + org_id
-- `POST /auth/signin` - Sign in (email, password) → JWT + org_id
+- `POST /auth/signup` - Magic link signup (email) → Send magic link
+- `GET /auth/callback` - Magic link/OAuth callback → JWT + auto-setup
 - `POST /auth/oauth/signin` - OAuth sign in
-- `POST /auth/oauth/callback` - OAuth callback
 - `POST /auth/refresh` - Refresh JWT
 - `POST /auth/signout` - Sign out
 - `GET /me` - Get current user (JWT)
+- `GET /onboarding` - Get welcome content and steps
 
 ### Knowledge Bases
 
@@ -137,21 +139,21 @@ Use the TypeScript client in `frontend-api-client.ts`:
 
 ```typescript
 import { useKnowledgeBaseAPI } from './api-client';
-// Sign up
-const result = await KnowledgeBaseAPI.signup('user@example.com', 'password');
-localStorage.setItem('token', result.session.access_token);
 
-// Initialize API with JWT
-const api = useKnowledgeBaseAPI(result.session.access_token);
+// Magic link signup
+await KnowledgeBaseAPI.signup('user@example.com');
+// User receives email and clicks magic link
+// Redirects to /auth/callback which auto-creates account
 
-// Create KB
-const kb = await api.createKnowledgeBase('My KB', 'Description');
+// After signup, initialize API with JWT
+const api = useKnowledgeBaseAPI(localStorage.getItem('token'));
 
-// Upload files
+// Default KB and API key are already created
+// Upload files to default KB
 await api.uploadFiles([file1, file2]);
 
-// Query KB
-const answer = await api.query('What is X?', kb.id);
+// Query default KB
+const answer = await api.query('What is X?');
 ```
 
 See `frontend-api-client.ts` for complete examples and React components.
@@ -163,19 +165,20 @@ Both JWT and API keys are supported. Choose based on your use case:
 ### JWT (For Logged-in Users)
 
 ```typescript
-// 1. Sign up or sign in
-const auth = await KnowledgeBaseAPI.signup('user@example.com', 'password');
-const jwt = auth.session.access_token;
+// 1. Magic link signup
+await KnowledgeBaseAPI.signup('user@example.com');
+// User clicks magic link → auto-creates account/org/KB/API key
 
-// 2. Use JWT in requests
+// 2. Use JWT in requests (obtained from callback)
 const api = useKnowledgeBaseAPI(jwt);
 ```
 
 **Advantages:**
 - ✅ User-scoped: automatically tied to user's org
-- ✅ Auto-created org on signup
+- ✅ Auto-created org, KB, and API key on signup
 - ✅ Seamless frontend integration
 - ✅ Secure: no API key storage
+- ✅ Passwordless authentication
 
 ### API Keys (For Programmatic Access)
 
