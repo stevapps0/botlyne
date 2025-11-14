@@ -1,16 +1,16 @@
 # Knowledge Base AI API
 
-A multi-tenant API that enables users to create accounts, organizations, and knowledge bases from uploaded files and URLs, then query them using AI-powered retrieval-augmented generation (RAG). Supports both **JWT authentication** (logged-in users) and **API keys** (programmatic access).
+A multi-tenant API that enables users to create accounts, organizations, and knowledge bases from uploaded files and URLs, then query them using AI-powered retrieval-augmented generation (RAG). Supports both **JWT authentication** (logged-in users via Supabase client-side auth) and **API keys** (programmatic access).
 
 ## Features
 
 ### Authentication ✅
 
-- **Magic Link Authentication**: Passwordless signup/signin via email
-- **Supabase Auth**: Email magic links and OAuth (Google/GitHub)
+- **Supabase Client-Side Auth**: Frontend handles OAuth (Google/GitHub) and magic links
 - **JWT Support**: Logged-in users get JWT tokens for seamless API access
-- **API Keys**: Programmatic access with sk-/kb_ prefixed keys
+- **API Keys**: Programmatic access with sk-/kb_ prefixed keys (securely hashed)
 - **Multi-Auth**: Endpoints support both JWT and API keys
+- **Protected Data**: Organization data requires authentication (no public access)
 
 ### User Onboarding ✅
 

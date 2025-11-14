@@ -1,6 +1,6 @@
 # Frontend Integration Guide
 
-This guide shows how to integrate with the Knowledge Base AI API from a frontend application.
+This guide shows how to integrate with the Knowledge Base AI API from a frontend application. Authentication is handled entirely client-side using Supabase Auth.
 
 ## Base URL
 ```
@@ -9,49 +9,86 @@ http://localhost:8000
 
 ## Authentication
 
-### 1. Email Magic Link Signin
+**Important**: Authentication is now handled entirely by Supabase client-side. The API only validates JWT tokens and API keys.
 
-Send a magic link to user's email for authentication.
+### 1. Supabase Client-Side Authentication
+
+Use Supabase's JavaScript client for authentication:
+
+```javascript
+import { createClient } from '@supabase/supabase-js'
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+// Magic Link Authentication
+const signInWithMagicLink = async (email) => {
+  const { data, error } = await supabase.auth.signInWithOtp({
+    email: email,
+    options: {
+      redirectTo: `${window.location.origin}/auth/callback`
+    }
+  })
+  return { data, error }
+}
+
+// OAuth Authentication (Google/GitHub)
+const signInWithOAuth = async (provider) => {
+  const { data, error } = await supabase.auth.signInWithOAuth({
+    provider: provider, // 'google' or 'github'
+    options: {
+      redirectTo: `${window.location.origin}/auth/callback`
+    }
+  })
+  return { data, error }
+}
+
+// Handle Auth Callback
+const handleAuthCallback = async () => {
+  const { data, error } = await supabase.auth.getSession()
+  if (data.session) {
+    // User is authenticated
+    const token = data.session.access_token
+    localStorage.setItem('token', token)
+
+    // Check if user needs onboarding
+    const userInfo = await getUserInfo(token)
+    if (!userInfo.org_id) {
+      // Redirect to onboarding
+      window.location.href = '/onboard'
+    } else {
+      // User is fully set up
+      window.location.href = '/dashboard'
+    }
+  }
+  return { data, error }
+}
+```
+
+### 2. Get Current User Info
+
+Get authenticated user's information using JWT token.
 
 **Request:**
 ```bash
-curl -X POST "http://localhost:8000/auth/signin" \
-  -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com"}'
+curl -X GET "http://localhost:8000/auth/user" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
 ```
 
 **Success Response (200):**
 ```json
 {
-  "message": "Magic link sent. Check your email and click the link to sign in.",
-  "email": "user@example.com"
+  "id": "user-uuid",
+  "email": "user@example.com",
+  "org_id": "org-uuid",
+  "role": "admin",
+  "kb_id": "kb-uuid"
 }
 ```
 
-**Failure Response (400):**
+**Failure Response (401):**
 ```json
 {
-  "detail": "Failed to send magic link: [error details]"
-}
-```
-
-### 2. OAuth Signin
-
-Get OAuth signin URL for Google or GitHub.
-
-**Request:**
-```bash
-curl -X POST "http://localhost:8000/auth/oauth/signin" \
-  -H "Content-Type: application/json" \
-  -d '{"provider": "google"}'
-```
-
-**Success Response (200):**
-```json
-{
-  "provider": "google",
-  "redirect_url": "https://accounts.google.com/oauth/authorize?...",
-  "message": "Redirect to google for authentication"
+  "detail": "Authentication failed"
 }
 ```
 
@@ -85,6 +122,8 @@ curl -X GET "http://localhost:8000/auth/user" \
 
 ## Organization Management
 
+**Note**: All organization endpoints now require authentication (JWT or API key).
+
 ### 1. Create Organization
 
 **Request:**
@@ -112,7 +151,28 @@ curl -X POST "http://localhost:8000/orgs" \
 }
 ```
 
-### 2. List Organization Users
+### 2. Get Organization Details
+
+**Request:**
+```bash
+curl -X GET "http://localhost:8000/orgs/org-uuid" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Success Response (200):**
+```json
+{
+  "id": "org-uuid",
+  "name": "My Company",
+  "created_at": "2024-01-01T00:00:00Z",
+  "updated_at": "2024-01-01T00:00:00Z",
+  "description": "A tech company focused on AI solutions",
+  "team_size": 25,
+  "shortcode": "a1b2c3"
+}
+```
+
+### 3. List Organization Users
 
 **Request:**
 ```bash
@@ -137,56 +197,67 @@ curl -X GET "http://localhost:8000/orgs/org-uuid/users" \
 
 ## Knowledge Base Management
 
+**Note**: All knowledge base endpoints now require authentication (JWT or API key).
+
 ### 1. Create Knowledge Base
 
 **Request:**
 ```bash
-curl -X POST "http://localhost:8000/api/v1/kb" \
+curl -X POST "http://localhost:8000/kb" \
   -H "Authorization: Bearer YOUR_JWT_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name": "My Knowledge Base", "shortcode": "mykb"}'
+  -d '{"name": "My Knowledge Base", "description": "Company documentation"}'
 ```
 
 **Success Response (200):**
 ```json
 {
-  "success": true,
-  "message": "Knowledge base created successfully",
-  "data": {
-    "kb": {
-      "id": "kb-uuid",
-      "org_id": "org-uuid",
-      "name": "My Knowledge Base",
-      "created_at": "2024-01-01T00:00:00Z"
-    }
-  }
+  "id": "kb-uuid",
+  "org_id": "org-uuid",
+  "name": "My Knowledge Base",
+  "description": "Company documentation",
+  "created_at": "2024-01-01T00:00:00Z"
 }
 ```
 
-### 2. List Knowledge Bases
+### 2. Get Knowledge Base Details
 
 **Request:**
 ```bash
-curl -X GET "http://localhost:8000/api/v1/kb" \
+curl -X GET "http://localhost:8000/kb/kb-uuid" \
   -H "Authorization: Bearer YOUR_JWT_TOKEN"
 ```
 
 **Success Response (200):**
 ```json
 {
-  "success": true,
-  "message": "Knowledge bases retrieved successfully",
-  "data": {
-    "kbs": [
-      {
-        "id": "kb-uuid",
-        "name": "My Knowledge Base",
-        "created_at": "2024-01-01T00:00:00Z",
-        "document_count": 5
-      }
-    ]
-  }
+  "id": "kb-uuid",
+  "org_id": "org-uuid",
+  "name": "My Knowledge Base",
+  "description": "Company documentation",
+  "created_at": "2024-01-01T00:00:00Z"
 }
+```
+
+### 3. List Organization Knowledge Bases
+
+**Request:**
+```bash
+curl -X GET "http://localhost:8000/orgs/org-uuid/kb" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Success Response (200):**
+```json
+[
+  {
+    "id": "kb-uuid",
+    "org_id": "org-uuid",
+    "name": "My Knowledge Base",
+    "description": "Company documentation",
+    "created_at": "2024-01-01T00:00:00Z"
+  }
+]
 ```
 
 ## File Upload
@@ -195,7 +266,7 @@ curl -X GET "http://localhost:8000/api/v1/kb" \
 
 **Request (multipart/form-data):**
 ```bash
-curl -X POST "http://localhost:8000/api/v1/upload" \
+curl -X POST "http://localhost:8000/upload" \
   -H "Authorization: Bearer YOUR_JWT_TOKEN" \
   -F "kb_id=kb-uuid" \
   -F "files=@document.pdf" \
@@ -218,7 +289,7 @@ curl -X POST "http://localhost:8000/api/v1/upload" \
 
 **Request:**
 ```bash
-curl -X GET "http://localhost:8000/api/v1/upload/status?kb_id=kb-uuid" \
+curl -X GET "http://localhost:8000/upload/status?kb_id=kb-uuid" \
   -H "Authorization: Bearer YOUR_JWT_TOKEN"
 ```
 
@@ -245,7 +316,7 @@ curl -X GET "http://localhost:8000/api/v1/upload/status?kb_id=kb-uuid" \
 
 **Request:**
 ```bash
-curl -X POST "http://localhost:8000/api/v1/query" \
+curl -X POST "http://localhost:8000/query" \
   -H "Authorization: Bearer YOUR_JWT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -288,7 +359,7 @@ curl -X POST "http://localhost:8000/api/v1/query" \
 
 **Request:**
 ```bash
-curl -X GET "http://localhost:8000/api/v1/conversations" \
+curl -X GET "http://localhost:8000/conversations" \
   -H "Authorization: Bearer YOUR_JWT_TOKEN"
 ```
 
@@ -326,7 +397,7 @@ curl -X GET "http://localhost:8000/api/v1/conversations" \
 
 **Request:**
 ```bash
-curl -X POST "http://localhost:8000/api/v1/apikeys" \
+curl -X POST "http://localhost:8000/apikeys" \
   -H "Authorization: Bearer YOUR_JWT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -359,7 +430,7 @@ curl -X POST "http://localhost:8000/api/v1/apikeys" \
 
 **Request:**
 ```bash
-curl -X GET "http://localhost:8000/api/v1/apikeys" \
+curl -X GET "http://localhost:8000/apikeys" \
   -H "Authorization: Bearer YOUR_JWT_TOKEN"
 ```
 
@@ -386,39 +457,67 @@ curl -X GET "http://localhost:8000/api/v1/apikeys" \
 
 ## Frontend Implementation Flow
 
-### 1. Authentication Flow
+### 1. Authentication Flow (Supabase Client-Side)
 
 ```javascript
-// 1. Send magic link
-const signin = async (email) => {
-  const response = await fetch('/auth/signin', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email })
-  });
-  return response.json();
-};
+import { createClient } from '@supabase/supabase-js'
 
-// 2. Handle auth callback (from magic link redirect)
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+// 1. Sign in with magic link
+const signInWithMagicLink = async (email) => {
+  const { data, error } = await supabase.auth.signInWithOtp({
+    email: email,
+    options: {
+      redirectTo: `${window.location.origin}/auth/callback`
+    }
+  })
+  return { data, error }
+}
+
+// 2. Sign in with OAuth
+const signInWithOAuth = async (provider) => {
+  const { data, error } = await supabase.auth.signInWithOAuth({
+    provider: provider, // 'google' or 'github'
+    options: {
+      redirectTo: `${window.location.origin}/auth/callback`
+    }
+  })
+  return { data, error }
+}
+
+// 3. Handle auth callback
 const handleAuthCallback = async () => {
-  const urlParams = new URLSearchParams(window.location.hash.substring(1));
-  const accessToken = urlParams.get('access_token');
+  const { data, error } = await supabase.auth.getSession()
 
-  if (accessToken) {
-    localStorage.setItem('token', accessToken);
-    // Redirect to dashboard
-    window.location.href = '/dashboard';
+  if (data.session) {
+    const token = data.session.access_token
+    localStorage.setItem('token', token)
+
+    // Check onboarding status
+    const userInfo = await getUserInfo(token)
+    if (!userInfo.org_id) {
+      window.location.href = '/onboard'
+    } else {
+      window.location.href = '/dashboard'
+    }
   }
-};
+}
 
-// 3. Get user info
-const getUser = async () => {
-  const token = localStorage.getItem('token');
+// 4. Get user info from API
+const getUserInfo = async (token) => {
   const response = await fetch('/auth/user', {
     headers: { 'Authorization': `Bearer ${token}` }
-  });
-  return response.json();
-};
+  })
+  return response.json()
+}
+
+// 5. Sign out
+const signOut = async () => {
+  await supabase.auth.signOut()
+  localStorage.removeItem('token')
+  window.location.href = '/login'
+}
 ```
 
 ### 2. Query Flow
@@ -426,7 +525,7 @@ const getUser = async () => {
 ```javascript
 const queryKB = async (query, kbId, conversationId = null) => {
   const token = localStorage.getItem('token');
-  const response = await fetch('/api/v1/query', {
+  const response = await fetch('/query', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -459,7 +558,7 @@ const uploadFiles = async (kbId, files, urls = []) => {
     formData.append('urls', JSON.stringify(urls));
   }
 
-  const response = await fetch('/api/v1/upload', {
+  const response = await fetch('/upload', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${token}` },
     body: formData

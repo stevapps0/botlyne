@@ -2,7 +2,7 @@
 
 ## Overview
 
-The test suite has been rewritten to align with the new JWT and API key authentication implementation. All tests are now structured to properly mock authentication tokens and validate both JWT and API key authentication flows.
+The test suite has been updated to align with the simplified authentication system using Supabase client-side auth and JWT/API key validation. All tests now properly mock JWT tokens and API keys for the consolidated authentication service.
 
 ## Test Structure
 
@@ -17,30 +17,33 @@ The test suite has been rewritten to align with the new JWT and API key authenti
    - `auth_headers_jwt` - Authorization headers with JWT
    - `auth_headers_api_key` - Authorization headers with API key
 
-2. **test_auth.py** - Authentication endpoints
-   - User signup with auto-org creation
-   - User signin with JWT + org_id response
-   - JWT token validation
-   - API key token validation
+2. **test_auth.py** - User management endpoints (no OAuth testing)
+   - Get user info with JWT validation
+   - Organization management (create, get, list users)
+   - API key management (create, list, delete)
+   - Admin role validation
    - Missing/invalid auth header handling
 
 3. **test_kb.py** - Knowledge base endpoints
    - Create KB with JWT auth
    - Create KB with API key auth
-   - Get KB details
-   - List organization KBs
-   - Verify auth is required
+   - Get KB details (now requires auth)
+   - List organization KBs (now requires auth)
+   - Verify auth is required for all KB operations
 
 4. **test_upload.py** - File/URL upload endpoints
    - Upload files with JWT
    - Upload files with API key
    - Upload URLs with JWT
+   - Check upload status
    - Verify auth is required
    - Verify kb_id is required
 
 5. **test_query.py** - Query endpoints
    - Query KB with JWT
    - Query KB with API key
+   - List conversations
+   - Resolve conversations
    - Verify auth is required
    - Verify kb_id and query parameters are required
 
@@ -62,6 +65,8 @@ The test suite has been rewritten to align with the new JWT and API key authenti
 
 ## Authentication Testing
 
+**Note**: Authentication testing now focuses on JWT and API key validation since OAuth is handled client-side by Supabase.
+
 ### JWT Testing
 
 JWT tokens are tested with tokens that have **no prefix**. Example:
@@ -78,20 +83,20 @@ JWT validation flow:
 
 ### API Key Testing
 
-API keys are tested with tokens that have **sk-** or **kb_** prefix. Example:
+API keys are tested with tokens that have **sk-** prefix. Example:
 ```python
 api_key_token = "sk-proj-test-api-key-123456789"
 auth_headers = {"Authorization": f"Bearer {api_key_token}"}
 ```
 
 API key validation flow:
-1. Token detected as API key (has sk-/kb_ prefix)
-2. Validated via `supabase.rpc("verify_api_key")`
-3. Returns TokenData with user_id, org_id, api_key_id
+1. Token detected as API key (has sk- prefix)
+2. Hashed and validated via database lookup
+3. Returns TokenData with user_id="api_key_user", org_id from key
 
 ### No Auth Testing
 
-All protected endpoints should return 403 when no Authorization header is provided.
+All protected endpoints should return 401 when no Authorization header is provided.
 
 ## Running Tests
 
@@ -231,15 +236,14 @@ with patch('src.core.auth_utils.supabase.auth.get_user') as mock_get_user:
 ### Mock API Key Validation
 
 ```python
-with patch('src.core.auth_utils.supabase.rpc') as mock_rpc:
-    mock_rpc_result = MagicMock()
-    mock_rpc_result.execute.return_value = MagicMock(data={
-        "user_id": sample_user["id"],
+with patch('src.core.database.supabase.table') as mock_table:
+    mock_key_result = MagicMock()
+    mock_key_result.data = {
         "org_id": sample_org["id"],
-        "kb_id": None,
-        "api_key_id": "sk-api-key-id"
-    })
-    mock_rpc.return_value = mock_rpc_result
+        "is_active": True,
+        "expires_at": None
+    }
+    mock_table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_key_result
     # Now API key validation will succeed
 ```
 
@@ -253,7 +257,7 @@ def test_query_kb_with_jwt(client, mock_supabase, sample_kb, sample_user, jwt_to
     auth_headers = {"Authorization": f"Bearer {jwt_token}"}
 
     # Mock JWT validation
-    with patch('src.core.auth_utils.supabase.auth.get_user') as mock_get_user:
+    with patch('src.core.database.supabase.auth.get_user') as mock_get_user:
         mock_get_user.return_value = MagicMock(user=MagicMock(id=sample_user["id"]))
 
         # Mock user lookup
@@ -268,7 +272,7 @@ def test_query_kb_with_jwt(client, mock_supabase, sample_kb, sample_user, jwt_to
 
         # ... test implementation ...
 
-        response = client.post("/api/v1/query",
+        response = client.post("/query",
                               json={"query": "test", "kb_id": sample_kb["id"]},
                               headers=auth_headers)
 
@@ -283,19 +287,18 @@ def test_query_kb_with_api_key(client, mock_supabase, sample_kb, api_key_token):
     auth_headers = {"Authorization": f"Bearer {api_key_token}"}
 
     # Mock API key validation
-    with patch('src.core.auth_utils.supabase.rpc') as mock_rpc:
-        mock_rpc_result = MagicMock()
-        mock_rpc_result.execute.return_value = MagicMock(data={
-            "user_id": "550e8400-e29b-41d4-a716-446655440000",
-            "org_id": "550e8400-e29b-41d4-a716-446655440001",
-            "kb_id": None,
-            "api_key_id": "sk-api-key-id"
-        })
-        mock_rpc.return_value = mock_rpc_result
+    with patch('src.core.database.supabase.table') as mock_table:
+        mock_key_result = MagicMock()
+        mock_key_result.data = {
+            "org_id": sample_kb["org_id"],
+            "is_active": True,
+            "expires_at": None
+        }
+        mock_table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_key_result
 
         # ... test implementation ...
 
-        response = client.post("/api/v1/query",
+        response = client.post("/query",
                               json={"query": "test", "kb_id": sample_kb["id"]},
                               headers=auth_headers)
 
@@ -307,9 +310,9 @@ def test_query_kb_with_api_key(client, mock_supabase, sample_kb, api_key_token):
 ```python
 def test_query_requires_auth(client):
     """Test that query endpoints require authentication."""
-    response = client.post("/api/v1/query",
+    response = client.post("/query",
                           json={"query": "Test", "kb_id": "test-id"})
-    assert response.status_code == 403
+    assert response.status_code == 401
 ```
 
 ## CI/CD Integration

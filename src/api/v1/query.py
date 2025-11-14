@@ -7,34 +7,14 @@ import logging
 # Import existing modules
 from src.archive.answer import retrieve_similar
 from src.archive.agent import agent
-from src.core.auth_utils import TokenData, validate_bearer_token
+from src.core.auth import get_current_user
+from src.core.auth_utils import TokenData
 
 # Initialize logging
 logger = logging.getLogger(__name__)
 
 from src.core.database import supabase
 from src.core.config import settings
-
-# Dependency to get current user
-async def get_current_user(authorization: str = Header(None, alias="Authorization")) -> TokenData:
-    """Extract and validate user from JWT token or API key."""
-    try:
-        if not authorization:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication required"
-            )
-        
-        token = authorization.replace("Bearer ", "")
-        return await validate_bearer_token(token)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Token validation failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token validation failed"
-        )
 
 router = APIRouter()
 
