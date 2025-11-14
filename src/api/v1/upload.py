@@ -75,55 +75,77 @@ class ListKBFilesRequest(BaseModel):
 # In-memory status tracking (use Redis/DB for production)
 processing_status = {}
 
-async def process_batch_async(batch_id: str, kb_id: str, files_data: List[dict], urls: List[str]):
-    """Background task to process uploaded files and URLs"""
+async def process_file_background(file_id: str, kb_id: str):
+    """Background task to process a single file from storage"""
+    logger.info(f"STARTING background processing for file {file_id}, kb {kb_id}")
     try:
-        status_obj = ProcessingStatus(
-            batch_id=batch_id,
-            status="processing",
-            progress=0,
-            total_items=len(files_data) + len(urls)
-        )
-        # Add kb_id to status object for filtering
-        status_obj.batch_id = kb_id
-        processing_status[batch_id] = status_obj
+        # Update status to processing
+        logger.info(f"Updating status to processing for file {file_id}")
+        supabase.table("files").update({"status": "processing"}).eq("id", file_id).execute()
 
-        total_processed = 0
+        # Get file metadata
+        logger.info(f"Fetching metadata for file {file_id}")
+        file_result = supabase.table("files").select("*").eq("id", file_id).single().execute()
+        if not file_result.data:
+            logger.error(f"File {file_id} not found in database")
+            return
 
-        # Process files
-        for file_data in files_data:
-            try:
-                # Extract content
-                processed = await ItemProcessor.process((file_data["filename"], file_data["content"]), str(uuid.uuid4()))
-                if processed.status == "success":
-                    # Transform and load
-                    vectorized_data = vectorize_and_chunk(processed.content, {"source": file_data["filename"]})
-                    load_to_supabase(vectorized_data, kb_id)
-                total_processed += 1
-                processing_status[batch_id].progress = total_processed
-            except Exception as e:
-                logger.error(f"Failed to process file {file_data['filename']}: {e}")
+        file_data = file_result.data
+        download_url = file_data["url"]
+        logger.info(f"File metadata: {file_data}")
+        logger.info(f"Download URL: {download_url}")
 
-        # Process URLs
-        for url in urls:
-            try:
-                # Extract content
-                processed = await ItemProcessor.process(url, str(uuid.uuid4()))
-                if processed.status == "success":
-                    # Transform and load
-                    vectorized_data = vectorize_and_chunk(processed.content, {"source": url})
-                    load_to_supabase(vectorized_data, kb_id)
-                total_processed += 1
-                processing_status[batch_id].progress = total_processed
-            except Exception as e:
-                logger.error(f"Failed to process URL {url}: {e}")
+        # Process file via signed URL
+        logger.info(f"Starting Docling processing for signed URL: {download_url}")
+        processed = await ItemProcessor.process(download_url, str(uuid.uuid4()))
+        logger.info(f"Docling processing result: status={processed.status}, content_length={len(processed.content) if processed.content else 0}")
 
-        processing_status[batch_id].status = "completed"
-        processing_status[batch_id].completed_at = "now"
+        if processed.status == "success":
+            logger.info(f"Chunking content for file {file_id}")
+            # Transform and load
+            vectorized_data = vectorize_and_chunk(processed.content, {"source": file_data["filename"]})
+            # Add chunk sizes to metadata for monitoring
+            for chunk in vectorized_data:
+                chunk["metadata"]["chunk_size"] = len(chunk["content"])
+            logger.info(f"Created {len(vectorized_data)} chunks, loading to DB")
+            chunks_created = load_to_supabase(vectorized_data, kb_id, file_id)
+            if chunks_created > 0:
+                logger.info(f"Successfully loaded {chunks_created} chunks for file {file_id}")
+                # Update status to completed only after successful DB insertion
+                logger.info(f"Updating status to completed for file {file_id}")
+                supabase.table("files").update({"status": "completed"}).eq("id", file_id).execute()
+            else:
+                logger.error(f"Failed to load chunks to DB for file {file_id}")
+                supabase.table("files").update({"status": "failed"}).eq("id", file_id).execute()
+        else:
+            logger.error(f"Docling processing failed for file {file_id}: {processed.error}")
+            supabase.table("files").update({"status": "failed"}).eq("id", file_id).execute()
 
     except Exception as e:
-        logger.error(f"Batch processing failed: {e}")
-        processing_status[batch_id].status = "failed"
+        logger.error(f"Background processing failed for file {file_id}: {e}")
+        logger.error(f"Exception details: {str(e)}")
+        supabase.table("files").update({"status": "failed"}).eq("id", file_id).execute()
+
+async def process_url_background(url_id: str, kb_id: str, url: str):
+    """Background task to process a single URL"""
+    try:
+        # Process URL
+        processed = await ItemProcessor.process(url, str(uuid.uuid4()))
+        if processed.status == "success":
+            # Transform and load
+            vectorized_data = vectorize_and_chunk(processed.content, {"source": url})
+            # Add chunk sizes to metadata for monitoring
+            for chunk in vectorized_data:
+                chunk["metadata"]["chunk_size"] = len(chunk["content"])
+            load_to_supabase(vectorized_data, kb_id, url_id)
+
+        # Update status to completed
+        supabase.table("files").update({"status": "completed"}).eq("id", url_id).execute()
+
+    except Exception as e:
+        logger.error(f"Background processing failed for URL {url}: {e}")
+        supabase.table("files").update({"status": "failed"}).eq("id", url_id).execute()
+
 
 @router.post("/upload", response_model=APIResponse)
 async def upload_knowledge(
@@ -138,7 +160,18 @@ async def upload_knowledge(
         # Determine kb_id to use
         kb_id_to_use = kb_id or current_user.kb_id
         if not kb_id_to_use:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Knowledge base ID is required")
+            # Auto-create default KB for user's org
+            if current_user.org_id:
+                kb_result = supabase.table("knowledge_bases").insert({
+                    "id": str(uuid.uuid4()),
+                    "org_id": current_user.org_id,
+                    "name": "Default Knowledge Base",
+                    "description": "Auto-created for uploads"
+                }).execute()
+                kb_id_to_use = kb_result.data[0]["id"]
+                logger.info(f"Auto-created KB: {kb_id_to_use} for org {current_user.org_id}")
+            else:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No organization found - complete onboarding first")
 
         # Parse URLs if provided
         urls_list = []
@@ -153,50 +186,52 @@ async def upload_knowledge(
         batch_id = str(uuid.uuid4())
         files_data = []
 
-        # Process uploaded files
+        # Process uploaded files - upload to storage first
         if files:
             for file in files:
                 if file.size and file.size > settings.MAX_FILE_SIZE:
                     raise HTTPException(status_code=400, detail=f"File {file.filename} exceeds max size")
 
                 content = await file.read()
+
+                # Upload to Supabase Storage
+                file_path = f"{kb_id_to_use}/{str(uuid.uuid4())}_{file.filename.replace(' ', '_')}"
+                try:
+                    supabase.storage.from_("files").upload(file_path, content)
+                    # Use signed URL for secure access
+                    signed_url_response = supabase.storage.from_("files").create_signed_url(file_path, 3600)  # 1 hour expiry
+                    download_url = signed_url_response if isinstance(signed_url_response, str) else signed_url_response.get("signedURL", signed_url_response)
+                except Exception as e:
+                    logger.error(f"Failed to upload {file.filename} to storage: {e}")
+                    raise HTTPException(status_code=500, detail=f"Storage upload failed for {file.filename}")
+
                 files_data.append({
                     "filename": file.filename,
                     "content": content,
-                    "file": file
+                    "file": file,
+                    "file_path": file_path,
+                    "download_url": download_url
                 })
 
         if not files_data and not urls_list:
             raise HTTPException(status_code=400, detail="No files or URLs provided")
 
-        # Start background processing
-        logger.info(f"Upload attempt: kb_id = {kb_id_to_use}, user = {current_user}")
-        background_tasks.add_task(process_batch_async, batch_id, kb_id_to_use, files_data, urls_list)
+        # Background processing started for files and URLs
+        logger.info(f"Upload attempt: kb_id = {kb_id_to_use}, user = {current_user}, files = {len(files_data)}, urls = {len(urls_list)}")
 
-        # Resolve a valid uploader user id to satisfy DB FK on files.uploaded_by
+        # Resolve uploader user id: for JWT use current_user.user_id, for API key use api_keys.created_by
         uploader_id = None
         try:
-            # If authenticated via API key, prefer the api_keys.created_by as the uploader
             if current_user.api_key_id:
+                # For API keys, get uploader from api_keys.created_by
                 key_row = supabase.table("api_keys").select("created_by").eq("id", current_user.api_key_id).single().execute()
                 if key_row.data and key_row.data.get("created_by"):
                     uploader_id = key_row.data.get("created_by")
-
-            # If we still don't have an uploader, check if a user_id was provided (user-scoped token)
-            if not uploader_id and current_user.user_id:
-                user_check = supabase.table("users").select("id").eq("id", current_user.user_id).single().execute()
-                if user_check.data:
-                    uploader_id = current_user.user_id
-
-            # Fallback: pick any user in the same org (admin/owner) to attribute the upload to
-            if not uploader_id and current_user.org_id:
-                org_user = supabase.table("users").select("id").eq("org_id", current_user.org_id).limit(1).execute()
-                if org_user.data and len(org_user.data) > 0:
-                    uploader_id = org_user.data[0]["id"]
-
-            if not uploader_id:
-                # No suitable user found — require a user-scoped token / association
-                raise HTTPException(status_code=400, detail="API key is not associated with a valid user in this organization. Please associate a user or use a user token.")
+                else:
+                    raise HTTPException(status_code=400, detail="API key not associated with a valid user")
+            else:
+                # For JWT tokens, use the authenticated user_id directly
+                uploader_id = current_user.user_id
         except HTTPException:
             raise
         except Exception as e:
@@ -218,12 +253,17 @@ async def upload_knowledge(
             file_record = {
                 "kb_id": kb_id_to_use,
                 "filename": file_data["filename"],
-                "file_path": file_path if 'file_path' in locals() else None,
+                "file_path": file_data["file_path"],
+                "url": file_data["download_url"],
                 "file_type": file_data["filename"].split(".")[-1] if "." in file_data["filename"] else "unknown",
                 "size_bytes": len(file_data["content"]),
-                "uploaded_by": uploader_id
+                "uploaded_by": uploader_id,
+                "status": "uploading"
             }
-            supabase.table("files").insert(file_record).execute()
+            result = supabase.table("files").insert(file_record).execute()
+            file_id = result.data[0]["id"]
+            # Start background processing for file
+            background_tasks.add_task(process_file_background, file_id, kb_id_to_use)
 
         for url in urls_list:
             file_record = {
@@ -231,16 +271,20 @@ async def upload_knowledge(
                 "filename": url,
                 "url": url,
                 "file_type": "url",
-                "uploaded_by": uploader_id
+                "uploaded_by": uploader_id,
+                "status": "processing"
             }
-            supabase.table("files").insert(file_record).execute()
+            result = supabase.table("files").insert(file_record).execute()
+            url_id = result.data[0]["id"]
+            # Process URL immediately
+            background_tasks.add_task(process_url_background, url_id, kb_id_to_use, url)
 
         return APIResponse(
             success=True,
-            message="Upload initiated. Processing in background.",
+            message="Upload completed. Files stored and processing started in background.",
             data={
-                "files_processed": len(files_data),
-                "urls_processed": len(urls_list)
+                "files_uploaded": len(files_data),
+                "urls_processing": len(urls_list)
             }
         )
 
@@ -256,30 +300,45 @@ async def upload_knowledge(
 
 @router.get("/upload/status", response_model=APIResponse)
 async def get_upload_status(kb_id: Optional[str] = None, current_user: TokenData = Depends(get_current_user)):
-    """Get processing status for the knowledge base"""
+    """Get processing status for files in the knowledge base"""
     try:
         kb_id_to_use = kb_id or current_user.kb_id
         if not kb_id_to_use:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Knowledge base ID is required")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Knowledge base ID is required")
 
-        # Get the most recent processing status for this KB
-        kb_statuses = {k: v for k, v in processing_status.items() if hasattr(v, 'kb_id') and v.kb_id == kb_id_to_use}
+        # Get all files for this KB with their statuses
+        result = supabase.table("files").select("id, filename, status, file_type, created_at").eq("kb_id", kb_id_to_use).execute()
 
-        if not kb_statuses:
-            return APIResponse(
-                success=True,
-                message="No active uploads found",
-                data={"status": "idle", "message": "No uploads in progress"}
-            )
+        files_status = []
+        for file in result.data:
+            files_status.append({
+                "id": file["id"],
+                "filename": file["filename"],
+                "status": file["status"],
+                "file_type": file["file_type"],
+                "uploaded_at": file["created_at"]
+            })
 
-        # Return the most recent status
-        latest_batch_id = max(kb_statuses.keys())
-        status_data = kb_statuses[latest_batch_id]
+        # Calculate summary
+        total_files = len(files_status)
+        completed = sum(1 for f in files_status if f["status"] == "completed")
+        processing = sum(1 for f in files_status if f["status"] == "processing")
+        failed = sum(1 for f in files_status if f["status"] == "failed")
+        uploading = sum(1 for f in files_status if f["status"] == "uploading")
 
         return APIResponse(
             success=True,
             message="Status retrieved successfully",
-            data={"status": status_data.dict()}
+            data={
+                "summary": {
+                    "total": total_files,
+                    "uploading": uploading,
+                    "processing": processing,
+                    "completed": completed,
+                    "failed": failed
+                },
+                "files": files_status
+            }
         )
     except HTTPException:
         raise

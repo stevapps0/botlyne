@@ -2,15 +2,17 @@ import os
 from typing import List
 from src.core.database import supabase
 
-def load_to_supabase(vectorized_data: List[dict], kb_id: str, table_name: str = "documents") -> int:
+def load_to_supabase(vectorized_data: List[dict], kb_id: str, file_id: str = None, table_name: str = "documents") -> int:
     """Load vectorized data into Supabase."""
     if not vectorized_data:
         print("No data to load")
         return 0
 
-    # Add kb_id to each document
+    # Add kb_id and file_id to each document
     for data in vectorized_data:
         data["kb_id"] = kb_id
+        if file_id:
+            data["file_id"] = file_id
 
     try:
         result = supabase.table(table_name).insert(vectorized_data).execute()
