@@ -94,6 +94,14 @@ class AuthResponse(BaseModel):
     user: dict
     session: dict | None = None
     redirect_url: str | None = None
+    org_id: str | None = None
+    kb_id: str | None = None
+    api_key: str | None = None
+
+class CompleteOnboardingRequest(BaseModel):
+    organization_name: str
+    description: str | None = None
+    team_size: int | None = None
 
 
 # Enhanced signin: send magic link
@@ -137,7 +145,7 @@ async def oauth_signin(data: OAuthSignInRequest):
         response = supabase.auth.sign_in_with_oauth({
             "provider": data.provider,
             "options": {
-                "redirect_to": getattr(settings, f"{data.provider.upper()}_REDIRECT_URL", "http://localhost:3000/auth/callback")
+                "redirect_to": f"{settings.FRONTEND_URL}/auth/callback"
             }
         })
         return {
@@ -185,7 +193,7 @@ async def auth_callback(code: str | None = None, error: str | None = None, invit
             logger.info(f"New user signup: {user.id}, {user.email}")
 
             if invite_data:
-                # User is accepting an invitation
+                # User is accepting an invitation - complete setup immediately
                 org_id = invite_data["org_id"]
                 role = invite_data["role"]
 
@@ -232,43 +240,112 @@ async def auth_callback(code: str | None = None, error: str | None = None, invit
                     "message": f"Welcome to {org_name}! You have been successfully added to the organization."
                 }
             else:
-                # Regular signup - create org, user record, and default KB
-                # Create organization
-                org_id = str(uuid.uuid4())
-                org_name = f"{user.email.split('@')[0]}'s Organization"
-                shortcode = secrets.token_hex(3)  # 6-character hex shortcode
-                org_result = supabase.table("organizations").insert({
-                    "id": org_id,
-                    "name": org_name,
-                    "shortcode": shortcode
+                # Regular signup - create minimal user record, require onboarding
+                user_result = supabase.table("users").insert({
+                    "id": user.id,
+                    "email": user.email,
+                    # no org_id yet - will be set during onboarding
                 }).execute()
 
-            logger.info(f"Organization created: {org_id}")
+                logger.info(f"Minimal user record created: {user.id}, {user.email}")
 
-            # Create user record
-            user_result = supabase.table("users").insert({
-                "id": user.id,
-                "email": user.email,
-                "org_id": org_id,
-                "role": "admin"  # First user is admin
-            }).execute()
+                return {
+                    "user": user.model_dump(),
+                    "session": response.session.model_dump() if response.session else None,
+                    "access_token": response.session.access_token if response.session else None,
+                    "message": "Please complete your onboarding to set up your account."
+                }
+        else:
+            # Existing user - check onboarding status
+            org_id = user_record.data.get("org_id")
+            if org_id:
+                # Fully onboarded user
+                # Get KB for the org
+                kb_record = supabase.table("knowledge_bases").select("id").eq("org_id", org_id).limit(1).execute()
+                kb_id = kb_record.data[0]["id"] if kb_record.data else None
 
-            logger.info(f"User record created: {user.id} in org {org_id}")
+                return {
+                    "user": user.model_dump(),
+                    "session": response.session.model_dump() if response.session else None,
+                    "access_token": response.session.access_token if response.session else None,
+                    "org_id": org_id,
+                    "kb_id": kb_id,
+                    "message": "Signin successful"
+                }
+            else:
+                # User stuck in onboarding (signed up but didn't complete)
+                return {
+                    "user": user.model_dump(),
+                    "session": response.session.model_dump() if response.session else None,
+                    "access_token": response.session.access_token if response.session else None,
+                    "message": "Please complete your onboarding."
+                }
 
-            # Create default knowledge base with org name prefix
-            kb_id = str(uuid.uuid4())
-            kb_name = f"{org_name} Knowledge Base"
-            kb_result = supabase.table("knowledge_bases").insert({
-                "id": kb_id,
-                "org_id": org_id,
-                "name": kb_name,
-                "description": "Your first knowledge base - start uploading documents here!",
-            }).execute()
+    except Exception as e:
+        logger.error(f"Auth callback error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Authentication failed: {str(e)}"
+        )
 
-            logger.info(f"Default KB created: {kb_id} for org {org_id}")
+@router.post("/auth/callback")
+async def auth_callback_post(code: str | None = None, error: str | None = None):
+    """Handle auth callback from magic link or OAuth (POST method for compatibility)"""
+    return await auth_callback(code, error)
 
-            # Upload onboarding content to KB
-            onboarding_content = """
+@router.post("/auth/onboarding")
+async def complete_onboarding(data: CompleteOnboardingRequest, current_user: TokenData = Depends(get_current_user)):
+    """Complete user onboarding by creating organization and knowledge base"""
+    try:
+        if not current_user.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not authenticated"
+            )
+
+        # Check if user already has an org
+        user_record = supabase.table("users").select("org_id").eq("id", current_user.user_id).single().execute()
+        if user_record.data and user_record.data.get("org_id"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User has already completed onboarding"
+            )
+
+        # Create organization
+        org_id = str(uuid.uuid4())
+        shortcode = secrets.token_hex(3)  # 6-character hex shortcode
+        org_result = supabase.table("organizations").insert({
+            "id": org_id,
+            "name": data.organization_name,
+            "description": data.description,
+            "team_size": data.team_size,
+            "shortcode": shortcode
+        }).execute()
+
+        logger.info(f"Organization created: {org_id} - {data.organization_name}")
+
+        # Update user record with org_id and role
+        user_result = supabase.table("users").update({
+            "org_id": org_id,
+            "role": "admin"  # First user is admin
+        }).eq("id", current_user.user_id).execute()
+
+        logger.info(f"User updated: {current_user.user_id} in org {org_id}")
+
+        # Create default knowledge base
+        kb_id = str(uuid.uuid4())
+        kb_name = f"{data.organization_name} Knowledge Base"
+        kb_result = supabase.table("knowledge_bases").insert({
+            "id": kb_id,
+            "org_id": org_id,
+            "name": kb_name,
+            "description": "Your first knowledge base - start uploading documents here!",
+        }).execute()
+
+        logger.info(f"Default KB created: {kb_id} for org {org_id}")
+
+        # Upload onboarding content to KB
+        onboarding_content = """
 Welcome to Your Knowledge Base!
 
 This is your welcome guide. Here's how to get started:
@@ -292,80 +369,45 @@ Your default API key has been created and associated with your knowledge base. Y
 - Explore the API documentation
 
 Welcome aboard!
-            """
-            onboarding_metadata = {
-                "source": "welcome.md",
-                "title": "Welcome Guide",
-                "type": "onboarding"
-            }
-            vectorized_data = vectorize_and_chunk(onboarding_content, onboarding_metadata)
-            load_to_supabase(vectorized_data, kb_id)
-            logger.info(f"Onboarding content uploaded to KB {kb_id}")
+        """
+        onboarding_metadata = {
+            "source": "welcome.md",
+            "title": "Welcome Guide",
+            "type": "onboarding"
+        }
+        vectorized_data = vectorize_and_chunk(onboarding_content, onboarding_metadata)
+        load_to_supabase(vectorized_data, kb_id)
+        logger.info(f"Onboarding content uploaded to KB {kb_id}")
 
-            # Create default API key
-            api_key = generate_api_key()
-            api_key_data = {
-                "org_id": org_id,
-                "name": "Default API Key",
-                "api_key": api_key,  # Plain key - assuming trigger handles hashing
-                "permissions": {"read": True, "write": True, "admin": False},
-                "created_by": user.id,
-                "expires_at": None,  # No expiration for default key
-                "is_active": True,
-                "kb_id": kb_id  # Associate with default KB
-            }
-            api_key_result = supabase.table("api_keys").insert(api_key_data).execute()
-            api_key_id = api_key_result.data[0]["id"]
-
-            logger.info(f"Default API key created: {api_key_id} for org {org_id}")
-
-            # Send welcome email via Supabase Edge Function
-            try:
-                email_data = {
-                    "to": user.email,
-                    "subject": "Welcome to Your Knowledge Base!",
-                    "org_name": org_name,
-                    "api_key": api_key,
-                    "kb_id": kb_id,
-                    "dashboard_url": f"{settings.FRONTEND_URL}/dashboard"
-                }
-                supabase.rpc('send_welcome_email', email_data).execute()
-                logger.info(f"Welcome email sent to {user.email}")
-            except Exception as e:
-                logger.error(f"Failed to send welcome email: {e}")
-                # Don't fail signup if email fails
-
-            return {
-                "user": user.model_dump(),
-                "session": response.session.model_dump() if response.session else None,
-                "access_token": response.session.access_token if response.session else None,
-                "org_id": org_id,
+        # Send welcome email (without API key)
+        try:
+            email_data = {
+                "to": user_result.data[0]["email"],
+                "subject": "Welcome to Your Knowledge Base!",
+                "org_name": data.organization_name,
                 "kb_id": kb_id,
-                "api_key": api_key,  # Return the plain key only on signup
-                "message": "Signup successful! Welcome to your new organization, knowledge base, and API key."
+                "dashboard_url": f"{settings.FRONTEND_URL}/dashboard"
             }
-        else:
-            # Existing user - just sign in
-            org_id = user_record.data.get("org_id")
-            return {
-                "user": user.model_dump(),
-                "session": response.session.model_dump() if response.session else None,
-                "access_token": response.session.access_token if response.session else None,
-                "org_id": org_id,
-                "message": "Signin successful"
-            }
+            supabase.rpc('send_welcome_email', email_data).execute()
+            logger.info(f"Welcome email sent to {user_result.data[0]['email']}")
+        except Exception as e:
+            logger.error(f"Failed to send welcome email: {e}")
+            # Don't fail onboarding if email fails
 
+        return {
+            "org_id": org_id,
+            "kb_id": kb_id,
+            "message": f"Welcome to {data.organization_name}! Your account is now fully set up."
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Auth callback error: {e}")
+        logger.error(f"Complete onboarding error: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Authentication failed: {str(e)}"
+            detail=f"Failed to complete onboarding: {str(e)}"
         )
-
-@router.post("/auth/callback")
-async def auth_callback_post(code: str | None = None, error: str | None = None):
-    """Handle auth callback from magic link or OAuth (POST method for compatibility)"""
-    return await auth_callback(code, error)
 
 # Additional endpoints
 @router.post("/auth/refresh")

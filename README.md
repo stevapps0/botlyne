@@ -14,9 +14,9 @@ A multi-tenant API that enables users to create accounts, organizations, and kno
 
 ### User Onboarding ✅
 
-- **Magic Link Signup**: Passwordless registration with auto-created organization, KB, and API key
-- **Seamless Setup**: One-click signup creates full account with welcome content
-- **Welcome Emails**: Custom SMTP emails with API key and dashboard links
+- **OAuth Onboarding**: Passwordless registration with organization setup and KB creation
+- **Controlled Setup**: Users provide organization details before account creation
+- **Welcome Emails**: Custom SMTP emails with dashboard links
 - **Organization Management**: Create and manage organizations
 - **Knowledge Bases**: Users can create multiple KBs per org
 
@@ -69,7 +69,8 @@ A multi-tenant API that enables users to create accounts, organizations, and kno
 
    ```bash
    cp .env.example .env
-   # Edit .env with your API keys
+   # Edit .env with your API keys and frontend URL
+   # FRONTEND_URL should match your frontend application's URL (e.g., http://localhost:3000 in development)
    ```
 
 4. **Database setup**:
@@ -89,19 +90,30 @@ API available at `http://localhost:8000` with docs at `http://localhost:8000/doc
 ## User Flow
 
 ```
-1. POST /auth/signup          → Send magic link email
-2. User clicks magic link     → Auto-create account + org + KB + API key
-3. POST /upload               → Upload files/URLs (JWT or API key)
-4. POST /query                → Query KB + get answers (JWT or API key)
+1. POST /auth/oauth/signin    → Get OAuth URL for Google/GitHub
+2. User authenticates         → Redirect to /auth/callback
+3. Check onboarding status    → org_id present/absent
+4. If no org_id: redirect to /onboard
+5. POST /auth/onboarding → Create org + KB + API key
+6. POST /upload               → Upload files/URLs (JWT or API key)
+7. POST /query                → Query KB + get answers (JWT or API key)
 ```
+
+**Onboarding Flow:**
+- New users authenticate → response has no `org_id` (incomplete onboarding)
+- Frontend checks: `if (!response.org_id)` → redirect to `/onboard`
+- User fills organization details
+- POST to `/auth/onboarding` → creates org + KB
+- Response includes `org_id`, `kb_id` (complete onboarding)
 
 ## API Endpoints
 
 ### Authentication
 
 - `POST /auth/signup` - Magic link signup (email) → Send magic link
-- `GET /auth/callback` - Magic link/OAuth callback → JWT + auto-setup
-- `POST /auth/oauth/signin` - OAuth sign in
+- `GET /auth/callback` - Magic link/OAuth callback → JWT + onboarding status
+- `POST /auth/oauth/signin` - OAuth sign in → Get OAuth URL
+- `POST /auth/onboarding` - Complete user onboarding → Create org/KB/API key
 - `POST /auth/refresh` - Refresh JWT
 - `POST /auth/signout` - Sign out
 - `GET /me` - Get current user (JWT)
@@ -140,16 +152,19 @@ Use the TypeScript client in `frontend-api-client.ts`:
 ```typescript
 import { useKnowledgeBaseAPI } from './api-client';
 
-// Magic link signup
-await KnowledgeBaseAPI.signup('user@example.com');
-// User receives email and clicks magic link
-// Redirects to /auth/callback which auto-creates account
+// OAuth signin (new flow)
+const response = await fetch('/auth/oauth/signin', {
+  method: 'POST',
+  body: JSON.stringify({ provider: 'google' })
+});
+// User completes OAuth → callback checks onboarding status
+// If no org_id: redirect to /onboard
+// After onboarding: user has org/kb, can upload files
 
-// After signup, initialize API with JWT
+// Initialize API with JWT after onboarding
 const api = useKnowledgeBaseAPI(localStorage.getItem('token'));
 
-// Default KB and API key are already created
-// Upload files to default KB
+// Upload files to user's KB
 await api.uploadFiles([file1, file2]);
 
 // Query default KB
@@ -165,20 +180,51 @@ Both JWT and API keys are supported. Choose based on your use case:
 ### JWT (For Logged-in Users)
 
 ```typescript
-// 1. Magic link signup
-await KnowledgeBaseAPI.signup('user@example.com');
-// User clicks magic link → auto-creates account/org/KB/API key
+// 1. OAuth signin
+const response = await fetch('/auth/oauth/signin', {
+  method: 'POST',
+  body: JSON.stringify({ provider: 'google' })
+});
+const { redirect_url } = await response.json();
+// Redirect user to redirect_url
 
-// 2. Use JWT in requests (obtained from callback)
-const api = useKnowledgeBaseAPI(jwt);
+// 2. After OAuth, check callback response
+const callbackResponse = await fetch('/auth/callback?code=' + authCode);
+const authData = await callbackResponse.json();
+
+if (!authData.org_id) {
+  // Redirect to onboarding - user needs to complete setup
+  window.location.href = '/onboard';
+} else {
+  // User is fully set up with org/kb
+  const api = useKnowledgeBaseAPI(authData.access_token);
+}
+
+// 3. Complete onboarding (if needed)
+const onboardingResponse = await fetch('/auth/onboarding', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${authData.access_token}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    organization_name: 'My Company',
+    description: 'Knowledge base for our team',
+    team_size: 5
+  })
+});
+
+const onboardingData = await onboardingResponse.json();
+// onboardingData: { org_id, kb_id, message }
+// No api_key generated during onboarding
 ```
 
 **Advantages:**
-- ✅ User-scoped: automatically tied to user's org
-- ✅ Auto-created org, KB, and API key on signup
+- ✅ User-scoped: tied to user's org after onboarding
+- ✅ Controlled account creation: collect org details first
 - ✅ Seamless frontend integration
-- ✅ Secure: no API key storage
-- ✅ Passwordless authentication
+- ✅ Secure: JWT-based authentication
+- ✅ Passwordless OAuth authentication
 
 ### API Keys (For Programmatic Access)
 
