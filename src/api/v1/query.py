@@ -3,6 +3,9 @@ from pydantic import BaseModel
 from typing import List, Optional
 import time
 import logging
+import hashlib
+from functools import lru_cache
+import asyncio
 
 # Import existing modules
 from src.archive.answer import retrieve_similar
@@ -15,6 +18,31 @@ logger = logging.getLogger(__name__)
 
 from src.core.database import supabase
 from src.core.config import settings
+
+# Simple in-memory cache for vector search results
+vector_search_cache = {}
+CACHE_TTL = 300  # 5 minutes
+
+def get_cache_key(query: str, kb_id: str) -> str:
+    """Generate cache key for query + kb combination"""
+    return hashlib.md5(f"{query}:{kb_id}".encode()).hexdigest()
+
+def get_cached_result(cache_key: str):
+    """Get cached result if still valid"""
+    if cache_key in vector_search_cache:
+        cached_data, timestamp = vector_search_cache[cache_key]
+        if time.time() - timestamp < CACHE_TTL:
+            logger.info(f"Cache hit for query: {cache_key}")
+            return cached_data
+        else:
+            # Expired, remove
+            del vector_search_cache[cache_key]
+    return None
+
+def set_cached_result(cache_key: str, data):
+    """Cache result with timestamp"""
+    vector_search_cache[cache_key] = (data, time.time())
+    logger.info(f"Cached result for query: {cache_key}")
 
 router = APIRouter()
 
@@ -147,31 +175,76 @@ async def query_knowledge_base(
             if not conv_check.data or conv_check.data["user_id"] != effective_user_id:
                 raise HTTPException(status_code=403, detail="Access denied")
 
-        # Retrieve similar documents
+        # Retrieve similar documents with caching (enhancement 2)
         logger.info(f"Querying KB {kb_id} for: '{data.query}'")
-        similar_docs = retrieve_similar(data.query, kb_id=kb_id, limit=5, table_name="documents")
+        cache_key = get_cache_key(data.query, kb_id)
+        similar_docs = get_cached_result(cache_key)
+
+        if similar_docs is None:
+            logger.info("Cache miss - performing vector search")
+            similar_docs = retrieve_similar(data.query, kb_id=kb_id, limit=5, table_name="documents")
+            set_cached_result(cache_key, similar_docs)
+        else:
+            logger.info("Using cached vector search results")
+
         logger.info(f"Found {len(similar_docs)} similar documents")
 
-        # Format context for agent
+        # Filter and optimize context (enhancement 1)
+        relevant_docs = [doc for doc in similar_docs if doc.get("similarity", 0) > 0.3]  # Minimum relevance threshold
+        logger.info(f"After relevance filtering: {len(relevant_docs)} documents")
+
+        # Format context for agent with length management
         context = ""
         sources = []
-        for doc in similar_docs:
+        total_context_length = 0
+        max_context_length = 8000  # ~2000 tokens safety limit
+
+        for doc in relevant_docs:
             similarity = doc.get("similarity", 0)
             content = doc.get("content", "")
             metadata = doc.get("metadata", {})
 
-            logger.info(f"Document similarity: {similarity:.3f}, content preview: {content[:100]}...")
+            # Check if adding this document would exceed context limit
+            potential_length = total_context_length + len(content)
+            if potential_length > max_context_length:
+                truncated_content = content[:max_context_length - total_context_length]
+                content = truncated_content
+                logger.info(f"Truncated document to fit context limit: {len(truncated_content)} chars")
+
+            logger.info(f"Document similarity: {similarity:.3f}, content length: {len(content)}")
             context += f"\n[Source] (Similarity: {similarity:.2%})\n{content}\n"
+            total_context_length += len(content)
+
             sources.append({
                 "content": content[:200] + "..." if len(content) > 200 else content,
                 "similarity": similarity,
                 "metadata": metadata
             })
 
-        # Generate AI response
+            # Stop if we've reached a reasonable number of sources
+            if len(sources) >= 3:
+                break
+
+        # Generate AI response with conversation history (enhancement 3)
         if not context.strip():
             logger.warning("No context found from knowledge base - empty results")
             context = "No relevant information found in the knowledge base."
+
+        # Get recent conversation history
+        conversation_history = []
+        if conversation_id:
+            try:
+                messages_result = supabase.table("messages").select("*").eq("conv_id", conversation_id).order("timestamp", desc=True).limit(10).execute()
+                recent_messages = messages_result.data[::-1]  # Reverse to chronological order
+
+                for msg in recent_messages[-6:]:  # Last 6 messages for context
+                    conversation_history.append({
+                        "role": msg["sender"],
+                        "content": msg["content"]
+                    })
+                logger.info(f"Included {len(conversation_history)} messages from conversation history")
+            except Exception as e:
+                logger.warning(f"Failed to load conversation history: {e}")
 
         # Include context in the user query itself since PydanticAI doesn't support runtime system prompt changes
         enhanced_query = f"""Based on the following knowledge base context, please answer the user's question.
@@ -183,15 +256,24 @@ User Question: {data.query}
 
 If the context doesn't contain relevant information to answer the question, please say so clearly."""
 
+        # Generate AI response with error resilience (enhancement 4)
         logger.info(f"Sending enhanced query to AI agent with context length: {len(context)}")
-        result = await agent.run(
-            enhanced_query,
-            message_history=[],  # Could implement conversation history
-            deps=None
-        )
 
-        ai_response = result.output
-        logger.info(f"AI response received, length: {len(ai_response)}")
+        try:
+            result = await agent.run(
+                enhanced_query,
+                message_history=conversation_history,  # Include conversation history
+                deps=None
+            )
+            ai_response = result.output
+            logger.info(f"AI response received, length: {len(ai_response)}")
+        except Exception as ai_error:
+            logger.error(f"AI service failed: {ai_error}")
+            # Fallback response
+            ai_response = "I'm sorry, I'm currently experiencing technical difficulties. Please try again in a moment, or contact support if the issue persists."
+            if context and context.strip():
+                ai_response += " Based on the available information, you might find relevant details in the knowledge base."
+
         response_time = time.time() - start_time
 
         # Check for handoff
@@ -211,13 +293,24 @@ If the context doesn't contain relevant information to answer the question, plea
             }
         ]).execute()
 
-        # Store metrics
+        # Store enhanced metrics (enhancement 5)
+        analytics = {
+            "query_length": len(data.query),
+            "sources_found": len(sources),
+            "context_length": len(context),
+            "response_quality": len(ai_response) / max(len(data.query), 1),  # Response-to-query ratio
+            "avg_similarity": sum(s["similarity"] for s in sources) / len(sources) if sources else 0
+        }
+
         supabase.table("metrics").insert({
             "conv_id": conversation_id,
             "response_time": response_time,
             "ai_responses": 1,
-            "handoff_triggered": handoff_triggered
+            "handoff_triggered": handoff_triggered,
+            "analytics": analytics  # Store analytics data
         }).execute()
+
+        logger.info(f"Query analytics: {analytics}")
 
         # Update conversation status if handoff
         if handoff_triggered:
