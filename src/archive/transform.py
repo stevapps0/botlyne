@@ -4,9 +4,10 @@ from sentence_transformers import SentenceTransformer
 # Initialize sentence transformer model
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
-# Configuration
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 50
+# Configuration - Optimized for all-MiniLM-L6-v2 RAG
+# 256-512 tokens ≈ 1000-2000 characters, 10-20% overlap
+CHUNK_SIZE = 1500  # ~300-400 tokens for typical English text
+CHUNK_OVERLAP = 200  # ~15% overlap
 
 def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
     """Split text into overlapping chunks."""
