@@ -6,6 +6,7 @@ import logging
 import hashlib
 from functools import lru_cache
 import asyncio
+import secrets
 
 # Import existing modules
 from src.archive.answer import retrieve_similar
@@ -51,6 +52,7 @@ class QueryRequest(BaseModel):
     query: str
     kb_id: Optional[str] = None  # Optional, will use API key's associated KB if not provided
     conversation_id: Optional[str] = None  # For continuing conversations
+    user_id: str  # Required user ID for conversation attribution
 
 class QueryResponse(BaseModel):
     conversation_id: str
@@ -142,7 +144,7 @@ async def query_knowledge_base(
             raise HTTPException(status_code=403, detail="Access denied")
 
         # Resolve an effective user id for the conversation (API keys are system-level)
-        effective_user_id = current_user.user_id
+        effective_user_id = data.user_id or current_user.user_id
         if not effective_user_id and current_user.api_key_id:
             # Try to attribute to the API key creator
             key_row = supabase.table("api_keys").select("created_by").eq("id", current_user.api_key_id).single().execute()
@@ -302,13 +304,13 @@ If the context doesn't contain relevant information to answer the question, plea
             "avg_similarity": sum(s["similarity"] for s in sources) / len(sources) if sources else 0
         }
 
-        supabase.table("metrics").insert({
+        supabase.table("metrics").upsert({
             "conv_id": conversation_id,
             "response_time": response_time,
             "ai_responses": 1,
             "handoff_triggered": handoff_triggered,
             "analytics": analytics  # Store analytics data
-        }).execute()
+        }, on_conflict="conv_id").execute()
 
         logger.info(f"Query analytics: {analytics}")
 
