@@ -163,14 +163,23 @@ async def query_knowledge_base(
         # Get or create conversation
         conversation_id = data.conversation_id
         if not conversation_id:
-            # Generate unique ticket number (6-character alphanumeric)
-            ticket_number = ''.join(secrets.choice('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ') for _ in range(6))
-            conv_result = supabase.table("conversations").insert({
-                "user_id": effective_user_id,
-                "kb_id": kb_id,
-                "ticket_number": ticket_number
-            }).execute()
-            conversation_id = conv_result.data[0]["id"]
+            # Try to find existing active conversation for this user/KB combination
+            existing_conv = supabase.table("conversations").select("id", "ticket_number").eq("user_id", effective_user_id).eq("kb_id", kb_id).eq("status", "ongoing").order("started_at", desc=True).limit(1).execute()
+
+            if existing_conv.data and len(existing_conv.data) > 0:
+                # Reuse existing conversation
+                conversation_id = existing_conv.data[0]["id"]
+                logger.info(f"Reusing existing conversation {conversation_id}")
+            else:
+                # Generate unique ticket number (6-character alphanumeric)
+                ticket_number = ''.join(secrets.choice('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ') for _ in range(6))
+                conv_result = supabase.table("conversations").insert({
+                    "user_id": effective_user_id,
+                    "kb_id": kb_id,
+                    "ticket_number": ticket_number
+                }).execute()
+                conversation_id = conv_result.data[0]["id"]
+                logger.info(f"Created new conversation {conversation_id} with ticket {ticket_number}")
         else:
             # Verify conversation ownership
             conv_check = supabase.table("conversations").select("user_id").eq("id", conversation_id).single().execute()

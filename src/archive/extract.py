@@ -42,8 +42,8 @@ class ProcessedItem:
         self.processed_at = processed_at or datetime.utcnow().isoformat()
 
 class Config:
-    OPENLYNE_API_URL = "https://crawl.openlyne.com"
-    OPENLYNE_API_KEY = os.getenv("OPENLYNE_API_KEY", "your-api-key")
+    SCRAPE_URL = os.getenv("SCRAPE_URL", "http://localhost:3001")
+    SCRAPE_API_KEY = os.getenv("SCRAPE_API_KEY", "your-api-key")
     MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
     DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".pptx", ".xlsx", ".html", ".md", ".txt", ".odt", ".rtf"}
     HTTP_TIMEOUT = 30.0
@@ -141,22 +141,22 @@ class DocumentProcessor:
             )
 
 class WebScraper:
-    """Scrape websites with OpenLyne API"""
+    """Scrape websites with local scraping API"""
 
     @staticmethod
     async def scrape(url: str, item_id: str) -> ProcessedItem:
-        """Scrape website using OpenLyne API"""
+        """Scrape website using local scraping API"""
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{Config.OPENLYNE_API_URL}/crawl",
-                    json={"url": url},
-                    headers={"Authorization": f"Bearer {Config.OPENLYNE_API_KEY}"},
+                    f"{Config.SCRAPE_URL}/scrape",
+                    json={"urls": [url]},
+                    headers={"Authorization": f"Bearer {Config.SCRAPE_API_KEY}"},
                     timeout=Config.HTTP_TIMEOUT
                 )
 
                 if response.status_code != 200:
-                    error_msg = f"OpenLyne API error: {response.status_code}"
+                    error_msg = f"Scraping API error: {response.status_code}"
                     logger.error(f"{error_msg} for {url}")
                     return ProcessedItem(
                         id=item_id,
@@ -165,31 +165,61 @@ class WebScraper:
                         source=url,
                         source_type=SourceType.URL,
                         content_type=ContentType.WEBSITE,
-                        processor="openlyne",
+                        processor="local_scraper",
                         status=ProcessingStatus.FAILED,
                         error=error_msg,
                         processed_at=datetime.utcnow().isoformat()
                     )
 
                 data = response.json()
-                return ProcessedItem(
-                    id=item_id,
-                    title=data.get("title"),
-                    content=data.get("content", ""),
-                    metadata={
-                        "url": url,
-                        "status_code": data.get("status_code"),
-                    },
-                    raw_response=data,
-                    source=url,
-                    source_type=SourceType.URL,
-                    content_type=ContentType.WEBSITE,
-                    processor="openlyne",
-                    status=ProcessingStatus.SUCCESS,
-                    processed_at=datetime.utcnow().isoformat()
-                )
+                # API returns array, get first result
+                if isinstance(data, list) and len(data) > 0:
+                    result = data[0]
+                    if result.get("success"):
+                        return ProcessedItem(
+                            id=item_id,
+                            title=result["data"].get("title"),
+                            content=result["data"].get("content", ""),
+                            metadata={
+                                "url": url,
+                                "timestamp": result["data"].get("timestamp"),
+                            },
+                            raw_response=result,
+                            source=url,
+                            source_type=SourceType.URL,
+                            content_type=ContentType.WEBSITE,
+                            processor="local_scraper",
+                            status=ProcessingStatus.SUCCESS,
+                            processed_at=datetime.utcnow().isoformat()
+                        )
+                    else:
+                        return ProcessedItem(
+                            id=item_id,
+                            content="",
+                            metadata={},
+                            source=url,
+                            source_type=SourceType.URL,
+                            content_type=ContentType.WEBSITE,
+                            processor="local_scraper",
+                            status=ProcessingStatus.FAILED,
+                            error="Scraping failed",
+                            processed_at=datetime.utcnow().isoformat()
+                        )
+                else:
+                    return ProcessedItem(
+                        id=item_id,
+                        content="",
+                        metadata={},
+                        source=url,
+                        source_type=SourceType.URL,
+                        content_type=ContentType.WEBSITE,
+                        processor="local_scraper",
+                        status=ProcessingStatus.FAILED,
+                        error="Invalid API response format",
+                        processed_at=datetime.utcnow().isoformat()
+                    )
         except httpx.RequestError as e:
-            logger.error(f"OpenLyne request error for {url}: {e}")
+            logger.error(f"Scraping API request error for {url}: {e}")
             return ProcessedItem(
                 id=item_id,
                 content="",
@@ -197,7 +227,7 @@ class WebScraper:
                 source=url,
                 source_type=SourceType.URL,
                 content_type=ContentType.WEBSITE,
-                processor="openlyne",
+                processor="local_scraper",
                 status=ProcessingStatus.FAILED,
                 error=f"Failed to scrape: {str(e)}",
                 processed_at=datetime.utcnow().isoformat()
