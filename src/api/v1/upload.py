@@ -373,6 +373,46 @@ async def list_kb_files(kb_id: Optional[str] = None, current_user: TokenData = D
             error=str(e)
         )
 
+@router.delete("/files/{file_id}")
+async def delete_file(file_id: str, kb_id: Optional[str] = None, current_user: TokenData = Depends(get_current_user)):
+    """Delete a file from knowledge base"""
+    try:
+        kb_id_to_use = kb_id or current_user.kb_id
+        if not kb_id_to_use:
+            raise HTTPException(status_code=400, detail="Knowledge base ID is required")
+
+        # Get file record and verify ownership
+        file_result = supabase.table("files").select("*").eq("id", file_id).eq("kb_id", kb_id_to_use).single().execute()
+        if not file_result.data:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        file_data = file_result.data
+
+        # Delete associated documents first (cascade)
+        supabase.table("documents").delete().eq("file_id", file_id).execute()
+
+        # Delete file record
+        supabase.table("files").delete().eq("id", file_id).execute()
+
+        # TODO: Delete from Supabase Storage if needed
+        # supabase.storage.from_("files").remove([file_data["file_path"]])
+
+        return APIResponse(
+            success=True,
+            message="File deleted successfully",
+            data={"file_id": file_id, "filename": file_data.get("filename")}
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete file {file_id}: {e}")
+        return APIResponse(
+            success=False,
+            message="Failed to delete file",
+            error=str(e)
+        )
+
 @router.get("/files/{file_id}/download")
 async def download_file(file_id: str, kb_id: Optional[str] = None, current_user: TokenData = Depends(get_current_user)):
     """Download a file from storage"""
