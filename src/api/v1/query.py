@@ -11,7 +11,8 @@ import secrets
 # Import existing modules
 # Import new services
 from src.services.retrieval import retrieval_service
-from src.services.ai import agent
+from src.services.ai import run_with_retry
+from src.services.email_service import email_service
 from src.core.auth import get_current_user
 from src.core.auth_utils import TokenData
 
@@ -82,47 +83,6 @@ def detect_handoff_intent(response: str, query: str) -> bool:
     combined_text = (response + " " + query).lower()
     return any(keyword in combined_text for keyword in handoff_keywords)
 
-async def send_handoff_email(conversation_id: str, query: str, context: str):
-    """Send email notification for human handoff"""
-    try:
-        import smtplib
-        from email.mime.text import MIMEText
-
-        # Email configuration from settings
-        SMTP_SERVER = settings.SMTP_SERVER
-        SMTP_PORT = settings.SMTP_PORT
-        SMTP_USER = settings.SMTP_USER
-        SMTP_PASS = settings.SMTP_PASS
-        SUPPORT_EMAIL = settings.SUPPORT_EMAIL
-
-        if not all([SMTP_USER, SMTP_PASS]):
-            logger.warning("SMTP credentials not configured, skipping email")
-            return
-
-        msg = MIMEText(f"""
-Human handoff requested for conversation {conversation_id}
-
-User Query: {query}
-
-Context: {context[:500]}...
-
-Please review and respond to the user.
-        """)
-
-        msg['Subject'] = f"Human Handoff: Conversation {conversation_id}"
-        msg['From'] = SMTP_USER
-        msg['To'] = SUPPORT_EMAIL
-
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
-        server.sendmail(SMTP_USER, SUPPORT_EMAIL, msg.as_string())
-        server.quit()
-
-        logger.info(f"Handoff email sent for conversation {conversation_id}")
-
-    except Exception as e:
-        logger.error(f"Failed to send handoff email: {e}")
 
 @router.post("/query", response_model=QueryResponse)
 async def query_knowledge_base(
@@ -272,7 +232,7 @@ If the context doesn't contain relevant information to answer the question, plea
         logger.info(f"Sending enhanced query to AI agent with context length: {len(context)}")
 
         try:
-            result = await agent.run(
+            result = await run_with_retry(
                 enhanced_query,
                 message_history=conversation_history,  # Include conversation history
                 deps=None
@@ -330,8 +290,12 @@ If the context doesn't contain relevant information to answer the question, plea
                 "status": "escalated"
             }).eq("id", conversation_id).execute()
 
-            # Send handoff email
-            await send_handoff_email(conversation_id, data.query, context)
+            # Send handoff email (non-blocking - failures don't interrupt response)
+            await email_service.send_handoff_notification(
+                conversation_id, 
+                data.query, 
+                context
+            )
 
         # Get ticket number for response
         conv_data = supabase.table("conversations").select("ticket_number").eq("id", conversation_id).single().execute()

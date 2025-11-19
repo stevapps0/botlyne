@@ -16,7 +16,10 @@ class Settings:
 
     # AI Configuration
     GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
-    OPENLYNE_API_KEY: str = os.getenv("OPENLYNE_API_KEY", "")
+    
+    # Scraping Service Configuration (local service)
+    SCRAPING_SERVICE_URL: str = os.getenv("SCRAPING_SERVICE_URL", "http://localhost:3001")
+    SCRAPING_API_KEY: str = os.getenv("SCRAPING_API_KEY", "")
 
     # Email Configuration (for human handoff)
     SMTP_SERVER: str = os.getenv("SMTP_SERVER", "smtp.gmail.com")
@@ -28,6 +31,15 @@ class Settings:
     # File Processing Configuration
     MAX_FILE_SIZE: int = int(os.getenv("MAX_FILE_SIZE", str(50 * 1024 * 1024)))  # 50MB default
     MAX_PARALLEL_TASKS: int = int(os.getenv("MAX_PARALLEL_TASKS", "10"))
+
+    # Timeout Configuration
+    AI_REQUEST_TIMEOUT: int = int(os.getenv("AI_REQUEST_TIMEOUT", "60"))  # 60 seconds
+    AI_MAX_RETRIES: int = int(os.getenv("AI_MAX_RETRIES", "3"))
+    SMTP_TIMEOUT: int = int(os.getenv("SMTP_TIMEOUT", "10"))
+    WEB_SCRAPING_TIMEOUT: int = int(os.getenv("WEB_SCRAPING_TIMEOUT", "30"))
+
+    # Scraping Service Configuration
+    SCRAPING_SERVICE_URL: str = os.getenv("SCRAPING_SERVICE_URL", "http://localhost:3001")
 
     # Frontend Configuration
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:8081")

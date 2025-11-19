@@ -17,12 +17,15 @@ from docling.datamodel.base_models import ConversionStatus
 # ============ Configuration ============
 logger = logging.getLogger(__name__)
 
+# Import settings for scraping service URL
+from src.core.config import settings
+
 class Config:
-    OPENLYNE_API_URL = "https://crawl.openlyne.com"
-    OPENLYNE_API_KEY = os.getenv("OPENLYNE_API_KEY", "your-api-key")
+    SCRAPING_SERVICE_URL = settings.SCRAPING_SERVICE_URL
+    SCRAPING_API_KEY = settings.SCRAPING_API_KEY
     MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
     DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".pptx", ".xlsx", ".html", ".md", ".txt", ".odt", ".rtf"}
-    HTTP_TIMEOUT = 30.0
+    HTTP_TIMEOUT = settings.WEB_SCRAPING_TIMEOUT
     HEAD_REQUEST_TIMEOUT = 10.0
     MAX_PARALLEL_TASKS = 10
 
@@ -155,67 +158,91 @@ class DocumentProcessor:
             )
 
 class WebScraper:
-    """Scrape websites with OpenLyne API"""
+    """Scrape websites with local scraping service"""
     
     @staticmethod
     async def scrape(url: str, item_id: str) -> ProcessedItem:
-        """Scrape website using OpenLyne API"""
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{Config.OPENLYNE_API_URL}/crawl",
-                    json={"url": url},
-                    headers={"Authorization": f"Bearer {Config.OPENLYNE_API_KEY}"},
-                    timeout=Config.HTTP_TIMEOUT
-                )
-                
-                if response.status_code != 200:
-                    error_msg = f"OpenLyne API error: {response.status_code}"
-                    logger.error(f"{error_msg} for {url}")
+        """Scrape website using local scraping service with automatic retry"""
+        from src.core.retry_utils import retry_http_request
+        
+        @retry_http_request(max_attempts=3)
+        async def _do_scrape() -> ProcessedItem:
+            """Inner function with retry logic"""
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        f"{Config.SCRAPING_SERVICE_URL}/scrape",
+                        json={"urls": [url]},
+                        headers={"Authorization": f"Bearer {Config.OPENLYNE_API_KEY}"},
+                        timeout=Config.HTTP_TIMEOUT
+                    )
+                    
+                    # Raise for HTTP errors (triggers retry on 5xx via decorator)
+                    response.raise_for_status()
+                    
+                    data = response.json()
+                    # Handle response - may be array or single object
+                    result_data = data[0] if isinstance(data, list) and len(data) > 0 else data
+                    
                     return ProcessedItem(
                         id=item_id,
-                        content="",
-                        metadata={"status_code": response.status_code},
+                        title=result_data.get("title"),
+                        content=result_data.get("content", ""),
+                        metadata={
+                            "url": url,
+                            "status_code": result_data.get("status_code"),
+                        },
+                        raw_response=result_data,
                         source=url,
                         source_type=SourceType.URL,
                         content_type=ContentType.WEBSITE,
-                        processor="openlyne",
-                        status=ProcessingStatus.FAILED,
-                        error=error_msg,
+                        processor="scraping_service",
+                        status=ProcessingStatus.SUCCESS,
                         processed_at=datetime.utcnow().isoformat()
                     )
-                
-                data = response.json()
-                return ProcessedItem(
-                    id=item_id,
-                    title=data.get("title"),
-                    content=data.get("content", ""),
-                    metadata={
-                        "url": url,
-                        "status_code": data.get("status_code"),
-                    },
-                    raw_response=data,
-                    source=url,
-                    source_type=SourceType.URL,
-                    content_type=ContentType.WEBSITE,
-                    processor="openlyne",
-                    status=ProcessingStatus.SUCCESS,
-                    processed_at=datetime.utcnow().isoformat()
+                    
+            except httpx.HTTPStatusError as e:
+                status_code = e.response.status_code
+                logger.error(f"HTTP {status_code} error for {url}: {e}")
+                return WebScraper._create_error_item(
+                    item_id, url, f"HTTP error {status_code}"
                 )
-        except httpx.RequestError as e:
-            logger.error(f"OpenLyne request error for {url}: {e}")
-            return ProcessedItem(
-                id=item_id,
-                content="",
-                metadata={},
-                source=url,
-                source_type=SourceType.URL,
-                content_type=ContentType.WEBSITE,
-                processor="openlyne",
-                status=ProcessingStatus.FAILED,
-                error=f"Failed to scrape: {str(e)}",
-                processed_at=datetime.utcnow().isoformat()
-            )
+                
+            except httpx.ConnectError as e:
+                logger.error(f"Connection error for {url}: {e}")
+                return WebScraper._create_error_item(
+                    item_id, url, "Cannot connect to scraping service"
+                )
+                
+            except httpx.TimeoutException as e:
+                logger.error(f"Timeout for {url}: {e}")
+                return WebScraper._create_error_item(
+                    item_id, url, "Request timeout"
+                )
+                
+            except Exception as e:
+                logger.error(f"Unexpected error scraping {url}: {e}")
+                return WebScraper._create_error_item(
+                    item_id, url, f"Unexpected error: {str(e)}"
+                )
+        
+        return await _do_scrape()
+    
+    @staticmethod
+    def _create_error_item(item_id: str, url: str, error: str) -> ProcessedItem:
+        """Create error ProcessedItem"""
+        return ProcessedItem(
+            id=item_id,
+            content="",
+            metadata={},
+            source=url,
+            source_type=SourceType.URL,
+            content_type=ContentType.WEBSITE,
+            processor="scraping_service",
+            status=ProcessingStatus.FAILED,
+            error=error,
+            processed_at=datetime.utcnow().isoformat()
+        )
 
 class ItemProcessor:
     """Route items to appropriate processor"""
