@@ -1,9 +1,10 @@
 """Test query endpoints with JWT and API key authentication."""
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 from main import app
 from src.core.auth import get_current_user
 from src.core.auth_utils import TokenData
+from src.services.ai_models import AgentResponse
 
 
 def test_query_kb_with_jwt(client, sample_kb, sample_user, jwt_token):
@@ -70,10 +71,14 @@ def test_query_kb_with_jwt(client, sample_kb, sample_user, jwt_token):
                 }]
 
                 # Mock AI response
-                with patch('src.services.ai.agent.run') as mock_agent_run:
-                    mock_result = MagicMock()
-                    mock_result.output = "This is the AI response."
-                    mock_agent_run.return_value = mock_result
+                with patch('src.services.ai_service.AIService.query_with_context') as mock_ai_query:
+                    mock_ai_response = AgentResponse(
+                        output="This is the AI response.",
+                        reasoning="I searched the KB and found relevant information.",
+                        tools_used=["access_knowledge_base"],
+                        confidence=0.92
+                    )
+                    mock_ai_query.return_value = mock_ai_response
 
                     response = client.post("/api/v1/query",
                                           json={

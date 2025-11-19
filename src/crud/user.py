@@ -2,7 +2,7 @@
 from typing import List, Optional
 from supabase import Client
 
-from app.core.database import supabase
+from src.core.database import supabase
 
 
 def get_user_by_id(user_id: str) -> Optional[dict]:

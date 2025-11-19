@@ -8,3 +8,4 @@ pydantic-ai
 python-multipart
 python-dotenv
 asyncpg
+sympy

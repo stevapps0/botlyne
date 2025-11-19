@@ -22,11 +22,11 @@ class Settings:
     SCRAPING_API_KEY: str = os.getenv("SCRAPING_API_KEY", "")
 
     # Email Configuration (for human handoff)
-    SMTP_SERVER: str = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+    SMTP_SERVER: str = os.getenv("SMTP_HOST", "smtp.gmail.com")
     SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
-    SMTP_USER: str = os.getenv("SMTP_USER", "")
-    SMTP_PASS: str = os.getenv("SMTP_PASS", "")
-    SUPPORT_EMAIL: str = os.getenv("SUPPORT_EMAIL", "support@company.com")
+    SMTP_USER: str = os.getenv("SMTP_USERNAME", "")
+    SMTP_PASS: str = os.getenv("SMTP_PASSWORD", "")
+    SUPPORT_EMAIL: str = os.getenv("SMTP_FROM_EMAIL", "support@company.com")
 
     # File Processing Configuration
     MAX_FILE_SIZE: int = int(os.getenv("MAX_FILE_SIZE", str(50 * 1024 * 1024)))  # 50MB default

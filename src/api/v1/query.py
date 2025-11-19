@@ -11,7 +11,7 @@ import secrets
 # Import existing modules
 # Import new services
 from src.services.retrieval import retrieval_service
-from src.services.ai import run_with_retry
+from src.services.ai_service import AIService
 from src.services.email_service import email_service
 from src.core.auth import get_current_user
 from src.core.auth_utils import TokenData
@@ -74,14 +74,19 @@ class ConversationResponse(BaseModel):
     resolved_at: Optional[str] = None
     ticket_number: Optional[str] = None
 
-def detect_handoff_intent(response: str, query: str) -> bool:
+def detect_handoff_intent(response: str, query: str, tools_used: List[str] = None) -> bool:
     """Simple heuristic to detect if human handoff is needed"""
     handoff_keywords = [
         "human", "support", "agent", "representative",
         "can't help", "don't know", "escalate", "transfer"
     ]
     combined_text = (response + " " + query).lower()
-    return any(keyword in combined_text for keyword in handoff_keywords)
+    keyword_match = any(keyword in combined_text for keyword in handoff_keywords)
+    
+    # Also check if no tools were used (indicates agent uncertainty)
+    no_tools_used = tools_used is not None and len(tools_used) == 0
+    
+    return keyword_match or no_tools_used
 
 
 @router.post("/query", response_model=QueryResponse)
@@ -232,24 +237,30 @@ If the context doesn't contain relevant information to answer the question, plea
         logger.info(f"Sending enhanced query to AI agent with context length: {len(context)}")
 
         try:
-            result = await run_with_retry(
-                enhanced_query,
-                message_history=conversation_history,  # Include conversation history
-                deps=None
+            ai_result = await AIService.query_with_context(
+                prompt=data.query,
+                user_id=effective_user_id,
+                relevant_docs=relevant_docs,
+                session_id=conversation_id,
+                timezone="UTC",  # TODO: Get from user profile
+                kb_id=kb_id,
+                history=conversation_history,
             )
-            ai_response = result.output
-            logger.info(f"AI response received, length: {len(ai_response)}")
+            ai_response = ai_result.output
+            tools_used = ai_result.tools_used
+            logger.info(f"AI response received, length: {len(ai_response)}, tools: {tools_used}")
         except Exception as ai_error:
             logger.error(f"AI service failed: {ai_error}")
             # Fallback response
             ai_response = "I'm sorry, I'm currently experiencing technical difficulties. Please try again in a moment, or contact support if the issue persists."
             if context and context.strip():
                 ai_response += " Based on the available information, you might find relevant details in the knowledge base."
+            tools_used = []
 
         response_time = time.time() - start_time
 
-        # Check for handoff
-        handoff_triggered = detect_handoff_intent(ai_response, data.query)
+        # Check for handoff with enhanced logic
+        handoff_triggered = detect_handoff_intent(ai_response, data.query, tools_used)
 
         # Store messages
         supabase.table("messages").insert([
@@ -271,7 +282,9 @@ If the context doesn't contain relevant information to answer the question, plea
             "sources_found": len(sources),
             "context_length": len(context),
             "response_quality": len(ai_response) / max(len(data.query), 1),  # Response-to-query ratio
-            "avg_similarity": sum(s["similarity"] for s in sources) / len(sources) if sources else 0
+            "avg_similarity": sum(s["similarity"] for s in sources) / len(sources) if sources else 0,
+            "tools_used": tools_used,
+            "reasoning": ai_result.reasoning if hasattr(ai_result, 'reasoning') else None
         }
 
         supabase.table("metrics").upsert({

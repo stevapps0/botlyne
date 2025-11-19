@@ -117,24 +117,23 @@ Please review and respond to the user.
     def _send_smtp_message(self, msg: MIMEText) -> None:
         """
         Send email message via SMTP.
-        
+
         Args:
             msg: Email message to send
-        
+
         Raises:
             smtplib.SMTPException: On SMTP errors
             ConnectionError: On connection failures
         """
-        with smtplib.SMTP(
-            self.smtp_server, 
-            self.smtp_port, 
+        with smtplib.SMTP_SSL(
+            self.smtp_server,
+            self.smtp_port,
             timeout=self.smtp_timeout
         ) as server:
-            server.starttls()
             server.login(self.smtp_user, self.smtp_pass)
             server.sendmail(
-                self.smtp_user, 
-                self.support_email, 
+                self.smtp_user,
+                self.support_email,
                 msg.as_string()
             )
 
