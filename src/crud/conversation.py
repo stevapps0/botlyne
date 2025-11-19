@@ -65,7 +65,8 @@ class ConversationCRUD:
         conv_id: UUID,
         escalation_status: str,
         customer_email: Optional[str] = None,
-        escalated_by: str = "ai"
+        escalated_by: str = "ai",
+        escalation_reason: Optional[str] = None
     ) -> bool:
         """Update conversation escalation information."""
         try:
@@ -76,6 +77,8 @@ class ConversationCRUD:
             }
             if customer_email:
                 update_data["customer_email"] = customer_email
+            if escalation_reason:
+                update_data["escalation_reason"] = escalation_reason
 
             supabase.table("conversations").update(update_data).eq("id", str(conv_id)).execute()
             return True

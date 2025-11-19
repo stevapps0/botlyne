@@ -321,7 +321,8 @@ CREATE TABLE IF NOT EXISTS "public"."conversations" (
     "escalation_status" "text" DEFAULT 'active',
     "customer_email" "text",
     "escalated_at" timestamp with time zone,
-    "escalated_by" "text"
+    "escalated_by" "text",
+    "escalation_reason" "text"
 );
 
 
@@ -441,7 +442,8 @@ CREATE TABLE IF NOT EXISTS "public"."organizations" (
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "description" "text",
-    "team_size" integer
+    "team_size" integer,
+    "support_email" "text"
 );
 
 

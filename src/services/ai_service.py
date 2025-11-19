@@ -110,7 +110,8 @@ class AIService:
                     await ConversationCRUD.update_escalation_status(
                         conv_id=conv_id,
                         escalation_status="escalating",
-                        escalated_by="ai"
+                        escalated_by="ai",
+                        escalation_reason=response.escalation_reason
                     )
 
                     # Update metrics to reflect handoff
@@ -274,6 +275,21 @@ class AIService:
                 return
 
             conversation = conv_result.data
+            escalation_reason = conversation.get("escalation_reason", "AI determined human assistance was needed")
+
+            # Get all organization users' emails
+            kb_result = supabase.table("knowledge_bases").select("org_id").eq("id", conversation["kb_id"]).single().execute()
+            if kb_result.data:
+                org_id = kb_result.data["org_id"]
+                # Get all users for this organization with their emails
+                users_result = supabase.table("users").select("email").eq("org_id", org_id).not_("email", "is", None).execute()
+                org_user_emails = [user["email"] for user in users_result.data or [] if user.get("email")]
+            else:
+                org_user_emails = []
+
+            if not org_user_emails:
+                logger.warning(f"No user emails found for organization, falling back to default support email")
+                org_user_emails = None  # Will use default support_email in email service
 
             # Get recent messages for context
             messages_result = supabase.table("messages").select("*").eq("conv_id", conv_id).order("timestamp", desc=True).limit(10).execute()
@@ -295,6 +311,7 @@ Conversation ID: {conv_id}
 Ticket Number: {conversation.get('ticket_number', 'N/A')}
 Customer Email: {customer_email}
 Status: Escalated
+Escalation Reason: {escalation_reason}
 
 Recent Conversation:
 {conversation_context}
@@ -302,15 +319,16 @@ Recent Conversation:
 Please reach out to the customer at {customer_email} to resolve this issue.
 """
 
-            # Send the notification email
+            # Send the notification email to all organization users
             success = await email_service.send_handoff_notification(
                 conv_id,
                 f"Escalated conversation - Customer email: {customer_email}",
-                email_body
+                email_body,
+                org_user_emails
             )
 
             if success:
-                logger.info(f"✅ Escalation email sent successfully for conversation {conv_id}")
+                logger.info(f"✅ Escalation email sent successfully for conversation {conv_id} to {len(org_user_emails) if org_user_emails else 0} organization users")
             else:
                 logger.error(f"❌ Failed to send escalation email for conversation {conv_id}")
 
