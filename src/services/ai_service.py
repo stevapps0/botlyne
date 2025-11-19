@@ -9,7 +9,10 @@ from functools import lru_cache
 
 from src.services.ai import run_agent
 from src.services.ai_models import AgentResponse
+from src.services.email_service import email_service
 from src.crud import ConversationCRUD, MessageCRUD, MetricsCRUD
+from src.core.database import supabase
+from src.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +168,7 @@ class AIService:
         # Build context from documents with length management
         context_parts = []
         total_length = 0
-        max_context_length = 8000  # Limit context to ~8000 characters
+        max_context_length = settings.MAX_CONTEXT_LENGTH
 
         if relevant_docs:
             for i, doc in enumerate(relevant_docs, 1):
@@ -259,11 +262,57 @@ class AIService:
     @staticmethod
     async def _notify_support_team(conv_id: str, customer_email: str) -> None:
         """
-        Notify support team about escalated conversation.
-        This is a placeholder - in production, this would send emails/SMS/notifications.
+        Notify support team about escalated conversation with customer email.
         """
         try:
-            logger.info(f"Support notification: Conversation {conv_id} escalated, customer email: {customer_email}")
-            # TODO: Implement actual notification system (email, Slack, etc.)
+            logger.info(f"📧 Sending escalation notification for conversation {conv_id} with customer email: {customer_email}")
+
+            # Get conversation details for the email
+            conv_result = supabase.table("conversations").select("*").eq("id", conv_id).single().execute()
+            if not conv_result.data:
+                logger.error(f"Conversation {conv_id} not found for escalation email")
+                return
+
+            conversation = conv_result.data
+
+            # Get recent messages for context
+            messages_result = supabase.table("messages").select("*").eq("conv_id", conv_id).order("timestamp", desc=True).limit(10).execute()
+            recent_messages = messages_result.data[::-1] if messages_result.data else []  # Reverse to chronological
+
+            # Build context from recent conversation
+            context_parts = []
+            for msg in recent_messages[-6:]:  # Last 6 messages
+                sender = "Customer" if msg["sender"] == "user" else "AI Assistant"
+                context_parts.append(f"{sender}: {msg['content'][:200]}...")
+
+            conversation_context = "\n".join(context_parts)
+
+            # Create detailed email body
+            email_body = f"""
+Handoff Notification - Customer Email Collected
+
+Conversation ID: {conv_id}
+Ticket Number: {conversation.get('ticket_number', 'N/A')}
+Customer Email: {customer_email}
+Status: Escalated
+
+Recent Conversation:
+{conversation_context}
+
+Please reach out to the customer at {customer_email} to resolve this issue.
+"""
+
+            # Send the notification email
+            success = await email_service.send_handoff_notification(
+                conv_id,
+                f"Escalated conversation - Customer email: {customer_email}",
+                email_body
+            )
+
+            if success:
+                logger.info(f"✅ Escalation email sent successfully for conversation {conv_id}")
+            else:
+                logger.error(f"❌ Failed to send escalation email for conversation {conv_id}")
+
         except Exception as e:
-            logger.error(f"Error notifying support team: {e}")
+            logger.error(f"Error notifying support team for conversation {conv_id}: {e}")

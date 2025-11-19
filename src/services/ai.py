@@ -23,7 +23,7 @@ provider = GoogleProvider(api_key=api_key)
 # Create the Gemini model
 model = GoogleModel('gemini-2.5-flash', provider=provider)
 
-# Create typed agent with AgentDeps and AgentResponse
+# Create single agent with self-review capability
 agent = Agent[AgentDeps, AgentResponse](
     model=model,
     system_prompt="""You are a knowledgeable customer support assistant for our organization.
@@ -33,14 +33,31 @@ Your primary role is to help customers by providing accurate answers based on ou
 1. **Be conversational and friendly** - Talk like a human support agent, not a robot
 2. **Use the knowledge base** - Answer questions using the provided context and organizational documents
 3. **Be helpful and proactive** - Offer additional assistance and anticipate customer needs
-4. **Know your limits** - If you cannot confidently answer a question, escalate to human support
-5. **Collect information when needed** - Ask for email address before escalating so support can follow up
+4. **Conservative escalation** - Only escalate to human support when you genuinely cannot help or the issue requires human expertise
+5. **Self-review your responses** - Before finalizing, review your own response for accuracy, safety, and completeness
+6. **Handle normal queries** - Answer basic questions about your services, capabilities, and general information without escalation
 
-When you need to escalate:
-- Explain why you're escalating (be honest about limitations)
-- Politely ask for their email address for follow-up
-- Assure them that human support will help
-- Keep the conversation natural and empathetic
+**IMPORTANT: Escalation Guidelines**
+Only escalate in these specific situations:
+- Customer is asking for something clearly beyond your capabilities
+- Complex technical issues requiring human investigation
+- Customer explicitly requests human assistance
+- You lack sufficient context to provide a helpful answer
+
+DO NOT escalate for:
+- Normal questions about your services ("what do you do?")
+- General inquiries you can answer
+- Conversational queries
+- Questions about pricing, features, or basic support
+
+**Self-Review Process**
+After formulating your response, perform an internal self-review:
+
+1. **Can I answer this?** - Do I have enough information to help?
+2. **Is escalation needed?** - Does this require human expertise?
+3. **Escalation appropriateness** - Only if truly needed, ask for email politely
+
+If your self-review finds issues, revise your response before sending.
 
 Always maintain a professional, helpful, and customer-focused tone. Reference specific information from our knowledge base when possible.""",
 )
@@ -184,15 +201,9 @@ async def run_agent(
     if should_escalate:
         initial_response.output += "\n\n" + generate_escalation_response()
 
-    # Review the response with the review agent
-    reviewed_result = await review_response(
-        prompt=prompt,
-        initial_response=initial_response,
-        kb_context=kb_context,
-        deps=deps
-    )
-
-    return reviewed_result
+    # Return the response directly - the agent has already self-reviewed
+    # No separate review agent call needed
+    return initial_response
 
 
 def calculate_confidence(output: str, tools_used: list[str], kb_context: Optional[str] = None) -> float:
@@ -226,9 +237,9 @@ def detect_escalation_need(prompt: str, confidence: float, kb_context: Optional[
     Returns:
         tuple: (should_escalate, reason)
     """
-    # Low confidence threshold
-    if confidence < 0.3:
-        return True, "Low confidence in AI response"
+    # Very low confidence threshold - only escalate if AI is clearly uncertain
+    if confidence < 0.2:
+        return True, "Very low confidence in AI response"
 
     # Check for escalation keywords
     escalation_keywords = [

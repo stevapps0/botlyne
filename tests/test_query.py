@@ -41,7 +41,8 @@ def test_query_kb_with_jwt(client, sample_kb, sample_user, jwt_token):
             # This will be called multiple times, so use side_effect
             mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.side_effect = [
                 mock_kb_check,  # First call: KB verification
-                mock_final_conv,  # Last call: ticket number fetch
+                MagicMock(data={"name": "Test Org", "description": "Test Description"}),  # Org context
+                mock_final_conv,  # Ticket number fetch
             ]
             
             # Configure table().select().eq().eq().eq().order().limit().execute() for conversation lookup
@@ -82,7 +83,7 @@ def test_query_kb_with_jwt(client, sample_kb, sample_user, jwt_token):
 
                     response = client.post("/api/v1/query",
                                           json={
-                                              "query": "What is machine learning?",
+                                              "message": "What is machine learning?",
                                               "kb_id": sample_kb["id"],
                                               "user_id": sample_user["id"]
                                           },
@@ -157,7 +158,7 @@ def test_query_kb_with_api_key(client, sample_kb, api_key_token):
 
                     response = client.post("/api/v1/query",
                                           json={
-                                              "query": "Test query",
+                                              "message": "Test query",
                                               "kb_id": sample_kb["id"],
                                               "user_id": "550e8400-e29b-41d4-a716-446655440000"
                                           },
@@ -188,7 +189,7 @@ def test_query_requires_kb_id(client, jwt_token):
 
     try:
         response = client.post("/api/v1/query",
-                              json={"query": "Test", "user_id": "550e8400-e29b-41d4-a716-446655440000"},
+                              json={"message": "Test", "user_id": "550e8400-e29b-41d4-a716-446655440000"},
                               headers=auth_headers)
 
         assert response.status_code in [400, 422]
@@ -207,7 +208,7 @@ def test_query_requires_query_text(client, sample_kb, jwt_token):
 
     try:
         response = client.post("/api/v1/query",
-                              json={"kb_id": sample_kb["id"], "user_id": "550e8400-e29b-41d4-a716-446655440000"},
+                              json={"message": "Test query", "kb_id": sample_kb["id"], "user_id": "550e8400-e29b-41d4-a716-446655440000"},
                               headers=auth_headers)
 
         assert response.status_code in [400, 422]

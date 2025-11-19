@@ -1,12 +1,13 @@
 from fastapi import APIRouter, HTTPException, status, Depends, Header
-from pydantic import BaseModel
-from typing import List, Optional
+from pydantic import BaseModel, Field, ConfigDict
+from typing import List, Optional, Dict, Tuple, Any
 import time
 import logging
 import hashlib
 from functools import lru_cache
 import asyncio
 import secrets
+import threading
 
 # Import existing modules
 # Import new services
@@ -22,39 +23,57 @@ logger = logging.getLogger(__name__)
 from src.core.database import supabase
 from src.core.config import settings
 
-# Simple in-memory cache for vector search results
-vector_search_cache = {}
-CACHE_TTL = 300  # 5 minutes
+# Thread-safe in-memory cache for vector search results
+import threading
+from typing import Dict, Tuple, Any
+
+vector_search_cache: Dict[str, Tuple[Any, float]] = {}
+cache_lock = threading.RLock()  # Reentrant lock for thread safety
 
 def get_cache_key(query: str, kb_id: str) -> str:
     """Generate cache key for query + kb combination"""
     return hashlib.md5(f"{query}:{kb_id}".encode()).hexdigest()
 
-def get_cached_result(cache_key: str):
-    """Get cached result if still valid"""
-    if cache_key in vector_search_cache:
-        cached_data, timestamp = vector_search_cache[cache_key]
-        if time.time() - timestamp < CACHE_TTL:
-            logger.info(f"Cache hit for query: {cache_key}")
-            return cached_data
-        else:
-            # Expired, remove
-            del vector_search_cache[cache_key]
-    return None
+def get_cached_result(cache_key: str) -> Any:
+    """Get cached result if still valid (thread-safe)"""
+    with cache_lock:
+        if cache_key in vector_search_cache:
+            cached_data, timestamp = vector_search_cache[cache_key]
+            if time.time() - timestamp < settings.CACHE_TTL_SECONDS:
+                logger.info(f"Cache hit for query: {cache_key}")
+                return cached_data
+            else:
+                # Expired, remove
+                del vector_search_cache[cache_key]
+        return None
 
-def set_cached_result(cache_key: str, data):
-    """Cache result with timestamp"""
-    vector_search_cache[cache_key] = (data, time.time())
-    logger.info(f"Cached result for query: {cache_key}")
+def set_cached_result(cache_key: str, data: Any) -> None:
+    """Cache result with timestamp (thread-safe)"""
+    with cache_lock:
+        vector_search_cache[cache_key] = (data, time.time())
+        logger.info(f"Cached result for query: {cache_key}")
+
+        # Periodic cleanup of expired entries (keep cache size manageable)
+        current_time = time.time()
+        expired_keys = [
+            k for k, (_, ts) in vector_search_cache.items()
+            if current_time - ts >= settings.CACHE_TTL_SECONDS
+        ]
+        for k in expired_keys:
+            del vector_search_cache[k]
+        if expired_keys:
+            logger.debug(f"Cleaned up {len(expired_keys)} expired cache entries")
 
 router = APIRouter()
 
 # Pydantic models
 class QueryRequest(BaseModel):
-    message: str  # Changed from 'query' to 'message'
-    user_id: str  # Required for customer tracking
-    kb_id: Optional[str] = None  # Optional: override API key's associated KB
-    conversation_id: Optional[str] = None  # For continuing conversations
+    message: str = Field(..., min_length=1, max_length=settings.MAX_MESSAGE_LENGTH, description="User query message")
+    user_id: str = Field(..., min_length=1, max_length=settings.MAX_USER_ID_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$', description="User identifier")
+    kb_id: Optional[str] = Field(None, min_length=1, max_length=settings.MAX_KB_ID_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$', description="Knowledge base ID")
+    conversation_id: Optional[str] = Field(None, min_length=1, max_length=settings.MAX_CONVERSATION_ID_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$', description="Conversation ID")
+
+    model_config = ConfigDict(str_strip_whitespace=True)
 
 class QueryResponse(BaseModel):
     conversation_id: str
@@ -77,20 +96,33 @@ class ConversationResponse(BaseModel):
 
 def detect_handoff_intent(response: str, query: str, tools_used: List[str] = None) -> bool:
     """Simple heuristic to detect if human handoff is needed"""
+    # More specific handoff keywords - avoid false positives from normal responses
     handoff_keywords = [
-        "human", "support", "agent", "representative",
-        "can't help", "don't know", "escalate", "transfer"
+        "human assistance", "speak to human", "talk to person", "real person",
+        "live support", "supervisor", "manager", "escalate this", "transfer me",
+        "can't assist", "unable to help", "don't have that information",
+        "beyond my capabilities", "need human help"
     ]
-    combined_text = (response + " " + query).lower()
-    keyword_match = any(keyword in combined_text for keyword in handoff_keywords)
 
-    # Also check if no tools were used (indicates agent uncertainty)
-    no_tools_used = tools_used is not None and len(tools_used) == 0
+    # Check query for explicit escalation requests
+    query_lower = query.lower()
+    query_escalation = any(keyword in query_lower for keyword in [
+        "human", "person", "supervisor", "manager", "escalate", "transfer"
+    ])
 
-    return keyword_match or no_tools_used
+    # Check response for clear inability to help (but not normal agent references)
+    response_lower = response.lower()
+    response_limitation = any(phrase in response_lower for phrase in [
+        "can't help", "cannot assist", "unable to help", "don't know",
+        "beyond my capabilities", "need human help"
+    ])
+
+    # Only trigger if query explicitly requests escalation OR response clearly indicates limitation
+    # Remove the "no tools used" check as it's causing false positives
+    return query_escalation or response_limitation
 
 
-def should_search_knowledge_base(message: str) -> bool:
+def should_search_knowledge_base(message: str, org_context: dict) -> bool:
     """Determine if knowledge base search is needed for this query"""
     # Skip KB search for simple conversational queries
     skip_keywords = [
@@ -113,8 +145,33 @@ def should_search_knowledge_base(message: str) -> bool:
         if question in message_lower:
             return False
 
-    # Default to searching KB for substantive queries
-    return True
+    # Check if query is relevant to the organization/industry
+    # Only search KB if the query seems related to the organization's domain
+    org_indicators = []
+    if org_context.get('name'):
+        # Add organization name words to indicators
+        org_indicators.extend(org_context['name'].lower().split())
+    if org_context.get('description'):
+        # Add industry/domain keywords from description
+        org_indicators.extend(org_context['description'].lower().split()[:10])  # First 10 words
+
+    # Common business/tech keywords that suggest KB search is needed
+    business_keywords = [
+        "app", "application", "software", "service", "product", "feature",
+        "pricing", "cost", "billing", "payment", "subscription", "account",
+        "login", "password", "support", "help", "issue", "problem", "error",
+        "integration", "api", "documentation", "guide", "tutorial"
+    ]
+
+    # Check if message contains organization or business-relevant keywords
+    has_org_relevance = any(indicator in message_lower for indicator in org_indicators)
+    has_business_relevance = any(keyword in message_lower for keyword in business_keywords)
+
+    # Only search KB if query seems relevant to organization or contains business keywords
+    should_search = has_org_relevance or has_business_relevance
+
+    logger.info(f"📊 KB SEARCH DECISION - Org relevance: {has_org_relevance}, Business relevance: {has_business_relevance}, Final decision: {should_search}")
+    return should_search
 
 
 async def get_org_context(org_id: str) -> dict:
@@ -146,6 +203,8 @@ async def query_knowledge_base(
     logger.info(f"🔐 AUTH - API Key: {current_user.api_key_id}, Org: {current_user.org_id}, KB: {current_user.kb_id}")
 
     try:
+        # PERFORMANCE: Track auth verification time
+        auth_start = time.time()
         # KB selection: request kb_id takes priority, then API key kb_id
         kb_id = data.kb_id or current_user.kb_id
         if not kb_id:
@@ -155,12 +214,18 @@ async def query_knowledge_base(
         logger.info(f"📚 KB SELECTED - ID: {kb_id}, Source: {'request' if data.kb_id else 'api_key'}")
 
         # Verify KB access
+        kb_verify_start = time.time()
         kb_check = supabase.table("knowledge_bases").select("org_id").eq("id", kb_id).single().execute()
+        kb_verify_time = time.time() - kb_verify_start
+        logger.info(f"⏱️ KB VERIFICATION TIME - {kb_verify_time:.3f}s")
+
         if not kb_check.data or kb_check.data["org_id"] != current_user.org_id:
             logger.warning(f"🚫 KB ACCESS DENIED - KB: {kb_id}, User Org: {current_user.org_id}, KB Org: {kb_check.data.get('org_id') if kb_check.data else 'None'}")
             raise HTTPException(status_code=403, detail="Access denied to specified knowledge base")
 
         logger.info(f"✅ KB ACCESS VERIFIED - KB: {kb_id} belongs to org: {current_user.org_id}")
+        auth_time = time.time() - auth_start
+        logger.info(f"⏱️ AUTH TOTAL TIME - {auth_time:.3f}s")
 
         # Use provided user_id directly (no resolution needed for random customers)
         effective_user_id = data.user_id
@@ -172,25 +237,32 @@ async def query_knowledge_base(
         logger.info(f"✅ ORG CONTEXT LOADED - Name: {org_context['name']}, Team Size: {org_context['team_size']}")
 
         # Get or create conversation
+        conv_start = time.time()
         conversation_id = data.conversation_id
         if not conversation_id:
             logger.info(f"💬 CONVERSATION LOOKUP - User: {effective_user_id}, KB: {kb_id}")
             # Try to find existing active conversation for this user/KB combination
+            conv_lookup_start = time.time()
             existing_conv = supabase.table("conversations").select("id", "ticket_number").eq("user_id", effective_user_id).eq("kb_id", kb_id).eq("status", "ongoing").order("started_at", desc=True).limit(1).execute()
+            conv_lookup_time = time.time() - conv_lookup_start
+            logger.info(f"⏱️ CONVERSATION LOOKUP TIME - {conv_lookup_time:.3f}s")
 
             if existing_conv.data and len(existing_conv.data) > 0:
                 # Reuse existing conversation
                 conversation_id = existing_conv.data[0]["id"]
                 logger.info(f"🔄 CONVERSATION REUSED - ID: {conversation_id}, Ticket: {existing_conv.data[0]['ticket_number']}")
             else:
-                # Generate unique ticket number (6-character alphanumeric)
-                ticket_number = ''.join(secrets.choice('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ') for _ in range(6))
+                # Generate unique ticket number (alphanumeric)
+                ticket_number = ''.join(secrets.choice('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ') for _ in range(settings.MAX_TICKET_LENGTH))
                 logger.info(f"🆕 CREATING NEW CONVERSATION - Ticket: {ticket_number}")
+                conv_create_start = time.time()
                 conv_result = supabase.table("conversations").insert({
                     "user_id": effective_user_id,
                     "kb_id": kb_id,
                     "ticket_number": ticket_number
                 }).execute()
+                conv_create_time = time.time() - conv_create_start
+                logger.info(f"⏱️ CONVERSATION CREATE TIME - {conv_create_time:.3f}s")
                 conversation_id = conv_result.data[0]["id"]
                 logger.info(f"✅ CONVERSATION CREATED - ID: {conversation_id}, Ticket: {ticket_number}")
         else:
@@ -204,32 +276,39 @@ async def query_knowledge_base(
 
         # Conditionally search knowledge base only when relevant
         logger.info(f"🤔 ANALYZING QUERY TYPE - Message: '{data.message}'")
-        should_search_kb = should_search_knowledge_base(data.message)
-        logger.info(f"📊 KB SEARCH DECISION - Search: {should_search_kb}, Reason: {'Substantive query' if should_search_kb else 'Conversational'}")
+        should_search_kb = should_search_knowledge_base(data.message, org_context)
+        logger.info(f"📊 KB SEARCH DECISION - Search: {should_search_kb}, Reason: {'Relevant to organization' if should_search_kb else 'Conversational/General'}")
 
         context = ""
         sources = []
 
         if should_search_kb:
             logger.info(f"🔍 KB SEARCH START - KB: {kb_id}, Query: '{data.message}'")
+            kb_search_start = time.time()
             cache_key = get_cache_key(data.message, kb_id)
             similar_docs = get_cached_result(cache_key)
 
             if similar_docs is None:
                 logger.info("💾 CACHE MISS - Performing vector search")
+                vector_start = time.time()
                 similar_docs = retrieval_service.search_similar(data.message, kb_id=kb_id, limit=5, table_name="documents")
+                vector_time = time.time() - vector_start
+                logger.info(f"⏱️ VECTOR SEARCH TIME - {vector_time:.3f}s")
                 set_cached_result(cache_key, similar_docs)
                 logger.info(f"✅ VECTOR SEARCH COMPLETED - Found {len(similar_docs)} documents")
             else:
                 logger.info(f"⚡ CACHE HIT - Using cached results: {len(similar_docs)} documents")
+            kb_search_time = time.time() - kb_search_start
+            logger.info(f"⏱️ KB SEARCH TOTAL TIME - {kb_search_time:.3f}s")
 
             # Filter and optimize context (enhancement 1)
-            relevant_docs = [doc for doc in similar_docs if doc.get("similarity", 0) > 0.3]  # Minimum relevance threshold
-            logger.info(f"🎯 RELEVANCE FILTERING - Before: {len(similar_docs)}, After: {len(relevant_docs)} (threshold: 0.3)")
+            relevant_docs = [doc for doc in similar_docs if doc.get("similarity", 0) > settings.SIMILARITY_THRESHOLD]
+            logger.info(f"🎯 RELEVANCE FILTERING - Before: {len(similar_docs)}, After: {len(relevant_docs)} (threshold: {settings.SIMILARITY_THRESHOLD})")
 
             # Format context for agent with length management
             total_context_length = 0
-            max_context_length = 8000  # ~2000 tokens safety limit
+            max_context_length = settings.MAX_CONTEXT_LENGTH
+            file_ids_to_fetch = []  # Collect file IDs for batch processing
 
             for i, doc in enumerate(relevant_docs):
                 similarity = doc.get("similarity", 0)
@@ -247,39 +326,69 @@ async def query_knowledge_base(
                 context += f"\n[Source] (Similarity: {similarity:.2%})\n{content}\n"
                 total_context_length += len(content)
 
-                # Get file information for standardized source format
-                source_url = None
-                source_title = None
-                if metadata and metadata.get("file_id"):
-                    try:
-                        file_result = supabase.table("files").select("url, filename").eq("id", metadata["file_id"]).single().execute()
-                        if file_result.data:
-                            file_url = file_result.data.get("url")
-                            filename = file_result.data.get("filename", "document")
-                            if file_url:
-                                source_url = file_url
-                            else:
-                                # Use API endpoint for file access
-                                source_url = f"{settings.API_BASE_URL}/api/v1/files/{metadata['file_id']}/view"
-                            source_title = filename
-                    except Exception as e:
-                        logger.warning(f"Failed to get file info for source: {e}")
-
-                # Use filename as title if available, otherwise use source name
-                title = source_title or (metadata.get("source", "Unknown") if metadata else "Unknown")
+                # Collect file_id for batch processing
+                file_id = metadata.get("file_id") if metadata else None
+                if file_id:
+                    file_ids_to_fetch.append(file_id)
 
                 sources.append({
-                    "title": title,
-                    "url": source_url,
-                    "filename": metadata.get("source", "Unknown") if metadata else "Unknown",
-                    "relevance_score": round(similarity, 2),
-                    "excerpt": content[:150] + "..." if len(content) > 150 else content
+                    "file_id": file_id,
+                    "title": str(metadata.get("source", "Unknown") if metadata else "Unknown"),
+                    "filename": str(metadata.get("source", "Unknown") if metadata else "Unknown"),
+                    "relevance_score": float(round(similarity, 2)),
+                    "excerpt": str(content[:150] + "..." if len(content) > 150 else content)
                 })
 
                 # Stop if we've reached a reasonable number of sources
-                if len(sources) >= 3:
+                if len(sources) >= settings.MAX_SOURCES_COUNT:
                     logger.info(f"🎯 MAX SOURCES REACHED - Stopping at {len(sources)} sources")
                     break
+
+            # Batch fetch file information to avoid N+1 queries
+            file_info_map = {}
+            if file_ids_to_fetch:
+                try:
+                    logger.info(f"📁 BATCH FETCHING {len(file_ids_to_fetch)} FILE INFO")
+                    file_batch_start = time.time()
+                    # Use a single query to get all files at once
+                    file_result = supabase.table("files").select("id", "url", "filename").in_("id", file_ids_to_fetch).execute()
+                    file_batch_time = time.time() - file_batch_start
+                    logger.info(f"⏱️ FILE BATCH QUERY TIME - {file_batch_time:.3f}s")
+
+                    # Create a map for quick lookup
+                    if file_result.data:
+                        for file_data in file_result.data:
+                            file_info_map[file_data["id"]] = {
+                                "url": file_data.get("url"),
+                                "filename": file_data.get("filename", "document")
+                            }
+                except Exception as e:
+                    logger.warning(f"Failed to batch fetch file info: {e}")
+
+            # Update sources with file information
+            for source in sources:
+                if source.get("file_id") and source["file_id"] in file_info_map:
+                    file_info = file_info_map[source["file_id"]]
+                    source["title"] = str(file_info["filename"])
+                    source["filename"] = str(file_info["filename"])
+                    if file_info["url"]:
+                        source["url"] = str(file_info["url"])
+                    else:
+                        # Use API endpoint for file access
+                        source["url"] = f"{settings.API_BASE_URL}/api/v1/files/{source['file_id']}/view"
+                else:
+                    # No file info available, use defaults
+                    source["url"] = None
+
+                # Ensure all fields have consistent types
+                source["title"] = str(source["title"])
+                source["filename"] = str(source["filename"])
+                source["url"] = str(source["url"]) if source["url"] else None
+                source["relevance_score"] = float(source["relevance_score"])
+                source["excerpt"] = str(source["excerpt"])
+
+                # Remove file_id from response (internal use only)
+                source.pop("file_id", None)
 
             if not context.strip():
                 logger.warning("⚠️ NO CONTEXT FOUND - KB search returned no relevant documents")
@@ -325,6 +434,7 @@ Respond professionally and helpfully as a support agent for {org_context['name']
         logger.info(f"🤖 AI PROCESSING START - Context length: {len(context)}, History: {len(conversation_history)} messages")
         logger.debug(f"📝 ENHANCED QUERY PREVIEW - {enhanced_query[:200]}...")
 
+        ai_start = time.time()
         ai_result = None
         try:
             logger.info("🚀 CALLING AI SERVICE - Primary agent processing")
@@ -339,10 +449,13 @@ Respond professionally and helpfully as a support agent for {org_context['name']
             )
             ai_response = ai_result.output
             tools_used = getattr(ai_result, 'tools_used', []) or []
+            ai_time = time.time() - ai_start
+            logger.info(f"⏱️ AI PROCESSING TIME - {ai_time:.3f}s")
             logger.info(f"✅ AI RESPONSE RECEIVED - Length: {len(ai_response)} chars, Tools used: {len(tools_used)}")
             logger.debug(f"💬 AI RESPONSE PREVIEW - {ai_response[:100]}...")
         except Exception as ai_error:
-            logger.error(f"❌ AI SERVICE FAILED - Error: {str(ai_error)}")
+            ai_time = time.time() - ai_start
+            logger.error(f"❌ AI SERVICE FAILED - Error: {str(ai_error)}, Time: {ai_time:.3f}s")
             # Fallback response
             ai_response = f"I'm sorry, I'm currently experiencing technical difficulties. As a support agent for {org_context['name']}, please try again in a moment or contact our support team if the issue persists."
             tools_used = []
@@ -401,14 +514,9 @@ Respond professionally and helpfully as a support agent for {org_context['name']
                 "status": "escalated"
             }).eq("id", conversation_id).execute()
 
-            # Send handoff email (non-blocking - failures don't interrupt response)
-            logger.info("📧 SENDING ESCALATION NOTIFICATION")
-            await email_service.send_handoff_notification(
-                conversation_id,
-                data.message,
-                context
-            )
-            logger.info("✅ ESCALATION EMAIL SENT")
+            # NOTE: Email will be sent later when user provides email address
+            # via the collect_customer_email endpoint
+            logger.info("📧 ESCALATION MARKED - Email will be sent after user provides contact info")
 
         # Get ticket number for response
         logger.info("🎫 FETCHING TICKET NUMBER")
@@ -431,10 +539,10 @@ Respond professionally and helpfully as a support agent for {org_context['name']
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Query failed: {e}")
+        logger.error(f"Query failed: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Query processing failed"
+            detail="An internal error occurred while processing your query. Please try again."
         )
 
 @router.get("/conversations", response_model=List[ConversationResponse])

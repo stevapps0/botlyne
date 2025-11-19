@@ -32,37 +32,40 @@ class EmailService:
         return all([self.smtp_user, self.smtp_pass, self.support_email])
     
     async def send_handoff_notification(
-        self, 
-        conversation_id: str, 
-        query: str, 
+        self,
+        conversation_id: str,
+        query: str,
         context: str
     ) -> bool:
         """
         Send handoff email notification with automatic retry.
-        
+
         Args:
             conversation_id: ID of the conversation being escalated
             query: User's query text
             context: Context from knowledge base
-        
+
         Returns:
             True if email sent successfully, False otherwise
         """
+        logger.info(f"📧 EMAIL DEBUG - Starting handoff notification for conv: {conversation_id}")
+        logger.info(f"📧 EMAIL DEBUG - SMTP Config - Server: {self.smtp_server}, Port: {self.smtp_port}, User: {self.smtp_user}, Support: {self.support_email}")
+
         if not self.is_configured():
             logger.warning("SMTP not configured, skipping email notification")
             return False
-        
+
         try:
             await self._send_email_with_retry(conversation_id, query, context)
-            logger.info(f"Handoff email sent for conversation {conversation_id}")
+            logger.info(f"✅ Handoff email sent for conversation {conversation_id}")
             return True
-            
+
         except smtplib.SMTPAuthenticationError as e:
-            logger.error(f"SMTP authentication failed: {e}")
+            logger.error(f"❌ SMTP authentication failed: {e}")
             return False  # Don't retry auth errors
-            
+
         except Exception as e:
-            logger.error(f"Failed to send handoff email after retries: {e}")
+            logger.error(f"❌ Failed to send handoff email after retries: {e}")
             return False
     
     @retry_smtp_operation(max_attempts=2)
@@ -125,17 +128,27 @@ Please review and respond to the user.
             smtplib.SMTPException: On SMTP errors
             ConnectionError: On connection failures
         """
-        with smtplib.SMTP_SSL(
-            self.smtp_server,
-            self.smtp_port,
-            timeout=self.smtp_timeout
-        ) as server:
-            server.login(self.smtp_user, self.smtp_pass)
-            server.sendmail(
-                self.smtp_user,
-                self.support_email,
-                msg.as_string()
-            )
+        logger.info(f"📧 EMAIL DEBUG - Connecting to SMTP: {self.smtp_server}:{self.smtp_port}, Timeout: {self.smtp_timeout}")
+        try:
+            with smtplib.SMTP_SSL(
+                self.smtp_server,
+                self.smtp_port,
+                timeout=self.smtp_timeout
+            ) as server:
+                logger.info("📧 EMAIL DEBUG - SMTP connection established")
+                logger.info(f"📧 EMAIL DEBUG - Attempting login for user: {self.smtp_user}")
+                server.login(self.smtp_user, self.smtp_pass)
+                logger.info("📧 EMAIL DEBUG - SMTP login successful")
+                logger.info(f"📧 EMAIL DEBUG - Sending email from {self.smtp_user} to {self.support_email}")
+                server.sendmail(
+                    self.smtp_user,
+                    self.support_email,
+                    msg.as_string()
+                )
+                logger.info("📧 EMAIL DEBUG - Email sent successfully")
+        except Exception as e:
+            logger.error(f"📧 EMAIL DEBUG - SMTP operation failed: {e}")
+            raise
 
 
 # Global email service instance
