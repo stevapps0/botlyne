@@ -492,7 +492,7 @@ Respond professionally and helpfully as a support agent for {org_context['name']
             "sources_found": len(sources),
             "context_length": len(context),
             "response_quality": len(ai_response) / max(len(data.message), 1),  # Response-to-message ratio
-            "avg_similarity": sum(s["similarity"] for s in sources) / len(sources) if sources else 0,
+            "avg_similarity": sum(s["relevance_score"] for s in sources) / len(sources) if sources else 0,
             "tools_used": tools_used,
             "reasoning": getattr(ai_result, 'reasoning', None) if ai_result else None
         }
