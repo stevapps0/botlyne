@@ -26,7 +26,7 @@ A multi-tenant API that enables users to create accounts, organizations, and kno
 - **Knowledge Base Management**: Create, list, and manage KBs
 - **ETL Pipeline**: Upload files (PDF, DOCX, etc.) and URLs
 - **Document Processing**: Automatic extraction and vectorization
-- **AI Querying**: Natural language RAG with context-aware answers
+- **AI Querying**: Advanced agent with confidence scoring, safe math evaluation, two-stage review, and intelligent escalation
 - **Vector Similarity Search**: PostgreSQL pgvector for retrieval
 - **Conversation History**: Track interactions and responses
 - **Human Handoff**: Escalation when AI can't resolve
@@ -36,7 +36,7 @@ A multi-tenant API that enables users to create accounts, organizations, and kno
 - **Backend**: FastAPI (Python)
 - **Database**: Supabase PostgreSQL with pgvector
 - **Storage**: Supabase Storage
-- **AI**: Pydantic AI with Google Gemini
+- **AI**: Advanced Pydantic AI agents with Google Gemini, confidence scoring, and two-stage review system
 - **Processing**: Docling for extraction, OpenLyne for web scraping
 - **Embeddings**: Sentence Transformers (all-MiniLM-L6-v2)
 
@@ -141,7 +141,7 @@ API available at `http://localhost:8000` with docs at `http://localhost:8000/doc
 
 ### Querying
 
-- `POST /api/v1/query` - Query KB (JWT or API key) → AI answer + sources
+- `POST /api/v1/query` - Advanced AI query with confidence scoring, source links, and optional KB override (JWT or API key)
 - `GET /api/v1/conversations` - List conversations
 - `POST /api/v1/conversations/{conv_id}/resolve` - Mark resolved
 

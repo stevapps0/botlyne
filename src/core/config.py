@@ -44,6 +44,9 @@ class Settings:
     # Frontend Configuration
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:8081")
 
+    # API Configuration
+    API_BASE_URL: str = os.getenv("API_BASE_URL", "http://localhost:8000")
+
 
 # Global settings instance
 settings = Settings()

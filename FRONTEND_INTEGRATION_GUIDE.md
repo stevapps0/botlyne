@@ -312,16 +312,16 @@ curl -X GET "http://localhost:8000/upload/status?kb_id=kb-uuid" \
 
 ## Querying
 
-### 1. Query Knowledge Base
+### 1. Query Knowledge Base (Enhanced AI Agent)
 
 **Request:**
 ```bash
-curl -X POST "http://localhost:8000/query" \
+curl -X POST "http://localhost:8000/api/v1/query" \
   -H "Authorization: Bearer YOUR_JWT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "query": "What is machine learning?",
-    "kb_id": "kb-uuid",
+    "message": "What is machine learning?",
+    "kb_id": "kb-uuid",  // Optional: overrides API key KB
     "conversation_id": null
   }'
 ```
@@ -330,16 +330,16 @@ curl -X POST "http://localhost:8000/query" \
 ```json
 {
   "conversation_id": "conv-uuid",
+  "user_id": "customer_123",
   "user_message": "What is machine learning?",
   "ai_response": "Machine learning is a subset of artificial intelligence...",
   "sources": [
     {
-      "content": "Machine learning is a method of data analysis...",
-      "similarity": 0.85,
-      "metadata": {
-        "source": "ml_guide.pdf",
-        "page": 1
-      }
+      "title": "Machine Learning Guide",
+      "url": "http://localhost:8000/api/v1/files/file-123/view",
+      "filename": "ml_guide.pdf",
+      "relevance_score": 0.89,
+      "excerpt": "Machine learning is a method of data analysis that automates analytical model building..."
     }
   ],
   "response_time": 1.23,
@@ -520,24 +520,38 @@ const signOut = async () => {
 }
 ```
 
-### 2. Query Flow
+### 2. Query Flow (Enhanced AI Agent)
 
 ```javascript
-const queryKB = async (query, kbId, conversationId = null) => {
+const queryKB = async (message, kbId = null, conversationId = null) => {
   const token = localStorage.getItem('token');
-  const response = await fetch('/query', {
+  const response = await fetch('/api/v1/query', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${token}`
     },
     body: JSON.stringify({
-      query,
-      kb_id: kbId,
+      message,           // Changed from 'query' to 'message'
+      kb_id: kbId,       // Optional: overrides API key KB
       conversation_id: conversationId
     })
   });
-  return response.json();
+
+  const result = await response.json();
+
+  // Handle standardized sources with clickable links
+  if (result.sources) {
+    result.sources.forEach(source => {
+      console.log(`Source: ${source.title} (${source.relevance_score})`);
+      if (source.url) {
+        // Open source document in new tab
+        window.open(source.url, '_blank');
+      }
+    });
+  }
+
+  return result;
 };
 ```
 
