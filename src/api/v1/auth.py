@@ -12,8 +12,7 @@ from src.core.config import settings
 from src.core.database import supabase
 from src.core.auth import get_current_user, require_admin
 from src.core.auth_utils import TokenData
-from src.archive.transform import vectorize_and_chunk
-from src.archive.load import load_to_supabase
+
 
 logger = logging.getLogger(__name__)
 

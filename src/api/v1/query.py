@@ -9,8 +9,9 @@ import asyncio
 import secrets
 
 # Import existing modules
-from src.archive.answer import retrieve_similar
-from src.archive.agent import agent
+# Import new services
+from src.services.retrieval import retrieval_service
+from src.services.ai import agent
 from src.core.auth import get_current_user
 from src.core.auth_utils import TokenData
 
@@ -193,7 +194,7 @@ async def query_knowledge_base(
 
         if similar_docs is None:
             logger.info("Cache miss - performing vector search")
-            similar_docs = retrieve_similar(data.query, kb_id=kb_id, limit=5, table_name="documents")
+            similar_docs = retrieval_service.search_similar(data.query, kb_id=kb_id, limit=5, table_name="documents")
             set_cached_result(cache_key, similar_docs)
         else:
             logger.info("Using cached vector search results")

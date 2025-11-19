@@ -5,7 +5,10 @@ from pydantic_ai.models.google import GoogleModel
 import os
 
 # Initialize the Google Gemini provider with your API key
-api_key = os.getenv('GOOGLE_API_KEY', 'AIzaSyD_AlYGpSVOy_UQ796Zsn8iJXqIy4SDLnY')
+api_key = os.getenv('GOOGLE_API_KEY')
+if not api_key:
+    raise ValueError("GOOGLE_API_KEY environment variable is not set")
+
 from pydantic_ai.providers.google import GoogleProvider
 provider = GoogleProvider(api_key=api_key)
 # Create the Gemini model

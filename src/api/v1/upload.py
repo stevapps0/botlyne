@@ -7,9 +7,9 @@ import logging
 from datetime import datetime
 
 # Import existing modules
-from src.archive.extract import ItemProcessor, Config as ExtractConfig
-from src.archive.transform import vectorize_and_chunk
-from src.archive.load import load_to_supabase
+# Import new services
+from src.services.etl import ItemProcessor
+from src.services.ingestion import ingestion_service
 from src.core.auth_utils import TokenData, validate_bearer_token
 
 # Initialize logging
@@ -103,12 +103,12 @@ async def process_file_background(file_id: str, kb_id: str):
         if processed.status == "success":
             logger.info(f"Chunking content for file {file_id}")
             # Transform and load
-            vectorized_data = vectorize_and_chunk(processed.content, {"source": file_data["filename"]})
+            vectorized_data = ingestion_service.vectorize_and_chunk(processed.content, {"source": file_data["filename"]})
             # Add chunk sizes to metadata for monitoring
             for chunk in vectorized_data:
                 chunk["metadata"]["chunk_size"] = len(chunk["content"])
             logger.info(f"Created {len(vectorized_data)} chunks, loading to DB")
-            chunks_created = load_to_supabase(vectorized_data, kb_id, file_id)
+            chunks_created = ingestion_service.load_to_supabase(vectorized_data, kb_id, file_id)
             if chunks_created > 0:
                 logger.info(f"Successfully loaded {chunks_created} chunks for file {file_id}")
                 # Update status to completed only after successful DB insertion
@@ -133,11 +133,11 @@ async def process_url_background(url_id: str, kb_id: str, url: str):
         processed = await ItemProcessor.process(url, str(uuid.uuid4()))
         if processed.status == "success":
             # Transform and load
-            vectorized_data = vectorize_and_chunk(processed.content, {"source": url})
+            vectorized_data = ingestion_service.vectorize_and_chunk(processed.content, {"source": url})
             # Add chunk sizes to metadata for monitoring
             for chunk in vectorized_data:
                 chunk["metadata"]["chunk_size"] = len(chunk["content"])
-            load_to_supabase(vectorized_data, kb_id, url_id)
+            ingestion_service.load_to_supabase(vectorized_data, kb_id, url_id)
 
         # Update status to completed
         supabase.table("files").update({"status": "completed"}).eq("id", url_id).execute()

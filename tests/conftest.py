@@ -34,10 +34,12 @@ def mock_supabase(use_live_db):
              patch('src.api.v1.kb.supabase') as mock_kb_supabase, \
              patch('src.api.v1.upload.supabase') as mock_upload_supabase, \
              patch('src.api.v1.query.supabase') as mock_query_supabase, \
-             patch('src.core.auth_utils.supabase') as mock_auth_utils_supabase:
+             patch('src.core.auth_utils.supabase') as mock_auth_utils_supabase, \
+             patch('src.services.ingestion.supabase') as mock_ingestion_supabase, \
+             patch('src.services.retrieval.supabase') as mock_retrieval_supabase:
 
             # Configure all supabase mocks to return the same mock
-            for mock in [mock_supabase, mock_auth_supabase, mock_kb_supabase, mock_upload_supabase, mock_query_supabase, mock_auth_utils_supabase]:
+            for mock in [mock_supabase, mock_auth_supabase, mock_kb_supabase, mock_upload_supabase, mock_query_supabase, mock_auth_utils_supabase, mock_ingestion_supabase, mock_retrieval_supabase]:
                 mock.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = MagicMock()
                 mock.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock()
                 mock.table.return_value.insert.return_value.execute.return_value = MagicMock()
