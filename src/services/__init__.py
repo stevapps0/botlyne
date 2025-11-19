@@ -1,6 +1,7 @@
 """Business logic services."""
 from .etl import *
 from .ai import *
+from .evolution_api import evolution_api_client
 
 __all__ = [
     # ETL services
@@ -13,4 +14,7 @@ __all__ = [
     "generate_ai_response",
     "detect_handoff_intent",
     "send_handoff_email",
+
+    # Evolution API services
+    "evolution_api_client",
 ]

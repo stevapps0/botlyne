@@ -31,6 +31,15 @@ A multi-tenant API that enables users to create accounts, organizations, and kno
 - **Conversation History**: Track interactions and responses
 - **Human Handoff**: Escalation when AI can't resolve
 
+### WhatsApp Integration ✅
+
+- **AI-Powered Chat**: Connect WhatsApp Business accounts to knowledge bases
+- **Automatic Responses**: Customers get instant AI answers from your KB
+- **Multi-Organization**: Each org can connect their own WhatsApp instances
+- **QR Code Setup**: Easy WhatsApp Web connection via QR scanning
+- **Webhook Processing**: Real-time message handling and response delivery
+- **Extensible Framework**: Ready for email, API, and other integrations
+
 ## Tech Stack
 
 - **Backend**: FastAPI (Python)
@@ -67,11 +76,23 @@ A multi-tenant API that enables users to create accounts, organizations, and kno
 
 3. **Environment setup**:
 
-   ```bash
-   cp .env.example .env
-   # Edit .env with your API keys and frontend URL
-   # FRONTEND_URL should match your frontend application's URL (e.g., http://localhost:3000 in development)
-   ```
+    ```bash
+    cp .env.example .env
+    # Edit .env with your API keys and frontend URL
+    # FRONTEND_URL should match your frontend application's URL (e.g., http://localhost:3000 in development)
+    ```
+
+4. **WhatsApp Integration Setup** (Optional):
+
+    If you want to enable WhatsApp integration, add your Evolution API credentials:
+
+    ```bash
+    # In your .env file
+    EVOLUTION_API_BASE_URL=https://evolution-api.sliplane.app
+    EVOLUTION_API_GLOBAL_KEY=your_evolution_api_key_here
+    ```
+
+    Organizations can then create WhatsApp integrations through the API to connect their WhatsApp Business accounts.
 
 4. **Database setup**:
 
@@ -144,6 +165,15 @@ API available at `http://localhost:8000` with docs at `http://localhost:8000/doc
 - `POST /api/v1/query` - Advanced AI query with confidence scoring, source links, and optional KB override (JWT or API key)
 - `GET /api/v1/conversations` - List conversations
 - `POST /api/v1/conversations/{conv_id}/resolve` - Mark resolved
+
+### Integrations
+
+- `POST /api/v1/integrations` - Create new integration (WhatsApp, email, API, etc.) (JWT)
+- `GET /api/v1/integrations` - List organization's integrations (JWT)
+- `GET /api/v1/integrations/{id}` - Get integration details (JWT)
+- `DELETE /api/v1/integrations/{id}` - Delete integration (JWT)
+- `GET /api/v1/integrations/{id}/qr` - Get QR code for WhatsApp setup (JWT)
+- `POST /api/v1/integrations/webhook/{id}` - Webhook handler for external services (no auth required)
 
 ## Frontend Integration
 
@@ -250,8 +280,11 @@ Required tables:
 - `api_keys` - API keys with org/KB association
 - `conversations` - conversation threads
 - `messages` - conversation messages
+- `integrations` - external service integrations (WhatsApp, email, etc.)
+- `integration_configs` - flexible configuration storage for integrations
+- `integration_events` - webhook and integration event logs
 
-See `schema.sql` for full schema.
+See `schema.sql` for full schema with RLS policies.
 
 ## Error Handling
 
@@ -306,6 +339,32 @@ curl -X GET "http://localhost:8000/api/v1/orgs/123e4567-e89b-12d3-a456-426614174
   -H "Authorization: Bearer YOUR_ADMIN_ACCESS_TOKEN"
 ```
 
+### Integrations
+
+#### Create WhatsApp Integration
+```bash
+curl -X POST "http://localhost:8000/api/v1/integrations" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "whatsapp",
+    "name": "Customer Support WhatsApp",
+    "kb_id": "your_kb_id_here"
+  }'
+```
+
+#### Get QR Code for WhatsApp Setup
+```bash
+curl -X GET "http://localhost:8000/api/v1/integrations/{integration_id}/qr" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+#### List Organization Integrations
+```bash
+curl -X GET "http://localhost:8000/api/v1/integrations" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
 ### Health Check
 ```bash
 curl -X GET "http://localhost:8000/health"
@@ -326,12 +385,19 @@ curl -X GET "http://localhost:8000/openapi.json"  # OpenAPI spec
 │   │   ├── auth.py        # Authentication endpoints
 │   │   ├── kb.py          # Knowledge base endpoints
 │   │   ├── upload.py      # Upload/processing endpoints
-│   │   └── query.py       # Query endpoints
+│   │   ├── query.py       # Query endpoints
+│   │   └── integrations.py # External integrations (WhatsApp, etc.)
 │   ├── core/              # Core functionality
 │   │   ├── config.py      # Settings and configuration
 │   │   └── database.py    # Database connection
-│   ├── models/            # Pydantic models
+│   ├── schemas/           # Pydantic models
+│   │   ├── auth.py        # Auth schemas
+│   │   ├── kb.py          # KB schemas
+│   │   ├── upload.py      # Upload schemas
+│   │   ├── query.py       # Query schemas
+│   │   └── integrations.py # Integration schemas
 │   └── services/          # Business logic (ETL, AI, etc.)
+│       ├── evolution_api.py # WhatsApp Evolution API client
 ├── archive/               # Original sample code
 ├── schema.sql             # Database schema
 ├── PRD.md                 # Product requirements
@@ -399,9 +465,9 @@ MIT License - see LICENSE file for details.
 
 ## Roadmap
 
-### Phase 2
+### Phase 2 ✅
 - Advanced metrics dashboard
-- WhatsApp integration for handoff
+- **WhatsApp integration for AI chat** ✅ COMPLETED
 - Conversation memory and context
 - Multi-language support
 

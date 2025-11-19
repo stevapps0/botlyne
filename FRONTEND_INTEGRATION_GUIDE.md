@@ -581,6 +581,177 @@ const uploadFiles = async (kbId, files, urls = []) => {
 };
 ```
 
+## WhatsApp Integration
+
+### 1. Create WhatsApp Integration
+
+**Request:**
+```bash
+curl -X POST "http://localhost:8000/api/v1/integrations" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "whatsapp",
+    "name": "Customer Support WhatsApp",
+    "kb_id": "your_kb_id_here"
+  }'
+```
+
+**Success Response (200):**
+```json
+{
+  "success": true,
+  "message": "WhatsApp integration created successfully",
+  "data": {
+    "integration": {
+      "id": "integration-uuid",
+      "org_id": "org-uuid",
+      "type": "whatsapp",
+      "name": "Customer Support WhatsApp",
+      "status": "active",
+      "kb_id": "kb-uuid",
+      "configs": [
+        {
+          "key": "instance_name",
+          "value": "org-uuid_whatsapp_uuid8",
+          "is_secret": false
+        }
+      ],
+      "created_at": "2024-01-01T00:00:00Z",
+      "updated_at": "2024-01-01T00:00:00Z"
+    }
+  }
+}
+```
+
+### 2. Get QR Code for WhatsApp Setup
+
+**Request:**
+```bash
+curl -X GET "http://localhost:8000/api/v1/integrations/integration-uuid/qr" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Success Response (200):**
+```json
+{
+  "success": true,
+  "message": "QR code retrieved successfully",
+  "data": {
+    "qr_code": {
+      "base64": "iVBORw0KGgoAAAANSUhEUgAA...",
+      "ascii": "█████████████████████████████████...",
+      "url": "https://example.com/qr"
+    }
+  }
+}
+```
+
+### 3. List Organization Integrations
+
+**Request:**
+```bash
+curl -X GET "http://localhost:8000/api/v1/integrations" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Success Response (200):**
+```json
+{
+  "success": true,
+  "message": "Integrations retrieved successfully",
+  "data": {
+    "integrations": [
+      {
+        "id": "integration-uuid",
+        "org_id": "org-uuid",
+        "type": "whatsapp",
+        "name": "Customer Support WhatsApp",
+        "status": "active",
+        "kb_id": "kb-uuid",
+        "configs": [
+          {
+            "key": "instance_name",
+            "value": "org-uuid_whatsapp_uuid8",
+            "is_secret": false
+          }
+        ],
+        "created_at": "2024-01-01T00:00:00Z",
+        "updated_at": "2024-01-01T00:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+### Frontend WhatsApp Integration Flow
+
+```javascript
+const setupWhatsAppIntegration = async (kbId, integrationName = 'Customer Support WhatsApp') => {
+  const token = localStorage.getItem('token');
+
+  try {
+    // 1. Create WhatsApp integration
+    const createResponse = await fetch('/api/v1/integrations', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        type: 'whatsapp',
+        name: integrationName,
+        kb_id: kbId
+      })
+    });
+
+    const createData = await createResponse.json();
+    const integrationId = createData.data.integration.id;
+
+    // 2. Get QR code for setup
+    const qrResponse = await fetch(`/api/v1/integrations/${integrationId}/qr`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+
+    const qrData = await qrResponse.json();
+
+    // 3. Display QR code to user
+    displayQRCode(qrData.data.qr_code);
+
+    // 4. Poll for connection status (optional)
+    const checkStatus = async () => {
+      const statusResponse = await fetch(`/api/v1/integrations/${integrationId}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const statusData = await statusResponse.json();
+      return statusData.data.integration.status;
+    };
+
+    // Check status every 5 seconds until active
+    const pollStatus = setInterval(async () => {
+      const status = await checkStatus();
+      if (status === 'active') {
+        clearInterval(pollStatus);
+        showSuccessMessage('WhatsApp integration is now active!');
+      }
+    }, 5000);
+
+  } catch (error) {
+    console.error('WhatsApp setup failed:', error);
+    showErrorMessage('Failed to setup WhatsApp integration');
+  }
+};
+
+const displayQRCode = (qrCodeData) => {
+  // Display QR code in modal or dedicated UI
+  const qrContainer = document.getElementById('qr-code-container');
+  qrContainer.innerHTML = `
+    <img src="data:image/png;base64,${qrCodeData.base64}" alt="WhatsApp QR Code">
+    <p>Scan this QR code with WhatsApp on your phone to connect your business account.</p>
+  `;
+};
+```
+
 ## Error Handling
 
 All API endpoints return appropriate HTTP status codes:

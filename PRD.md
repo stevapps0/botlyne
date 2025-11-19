@@ -54,6 +54,14 @@ To provide organizations with a secure, scalable platform for building and query
 - Email notifications to support team with query details and conversation history.
 - Manual resolution tracking and satisfaction scoring.
 
+### 7. WhatsApp Integration ✅
+- **AI-Powered WhatsApp Chat**: Connect WhatsApp Business accounts to knowledge bases
+- **Automatic Customer Responses**: Instant AI answers from organization's KB
+- **Multi-Organization Support**: Each org can connect their own WhatsApp instances
+- **QR Code Setup**: Easy WhatsApp Web connection via secure QR scanning
+- **Webhook Processing**: Real-time message handling and automated responses
+- **Extensible Framework**: Ready for future integrations (email, API, etc.)
+
 ## Technical Requirements
 
 ### Architecture
@@ -69,7 +77,8 @@ To provide organizations with a secure, scalable platform for building and query
 - **Organizations**: `/orgs` (CRUD), `/orgs/{id}/users` (manage members)
 - **Knowledge Bases**: `/orgs/{org_id}/kbs` (CRUD)
 - **Uploads**: `/kbs/{kb_id}/upload` (files/URLs)
-- **Querying**: `/query` (AI responses)
+- **Querying**: `/api/v1/query` (AI responses)
+- **Integrations**: `/api/v1/integrations` (WhatsApp, email, API setup)
 - **Metrics**: `/orgs/{org_id}/metrics` (analytics)
 - **Conversations**: `/conversations/{id}/resolve` (handoff management)
 
@@ -82,6 +91,9 @@ To provide organizations with a secure, scalable platform for building and query
 - **Conversations**: id, user_id, kb_id, status, started_at, resolved_at
 - **Messages**: id, conv_id, sender, content, timestamp
 - **Metrics**: id, conv_id, response_time, resolution_time, satisfaction_score, ai_responses, handoff_triggered, created_at
+- **Integrations**: id, org_id, type, name, status, kb_id, created_at, updated_at
+- **Integration Configs**: id, integration_id, key, value, is_secret, created_at
+- **Integration Events**: id, integration_id, event_type, payload, status, created_at
 
 ### Security
 - Row Level Security (RLS) for tenant isolation.
@@ -119,6 +131,12 @@ To provide organizations with a secure, scalable platform for building and query
 - I want to access conversation history so I can understand context.
 - I want to mark resolutions and collect satisfaction scores so I can track performance.
 
+### As a WhatsApp Integration User
+- I want to connect my WhatsApp Business account so customers can chat with AI.
+- I want customers to receive instant, accurate responses from my knowledge base.
+- I want to manage multiple WhatsApp integrations for different departments.
+- I want to monitor WhatsApp conversation analytics and performance.
+
 ## Success Metrics
 - **User Adoption**: Number of active organizations and API key usage.
 - **AI Performance**: AI resolution rate >85% with confidence scoring validation.
@@ -128,6 +146,7 @@ To provide organizations with a secure, scalable platform for building and query
 - **Escalation Rate**: <15% of queries with intelligent detection and smooth handoff.
 - **Source Transparency**: >90% of KB responses include clickable source links.
 - **Safety Score**: 100% of responses pass review agent safety checks.
+- **WhatsApp Integration**: >80% of organizations with active WhatsApp integrations, <3 second average response time, >90% message success rate.
 
 ## Risks & Mitigations
 - **AI Hallucinations**: Mitigated by RAG and source attribution in responses.
@@ -145,5 +164,6 @@ To provide organizations with a secure, scalable platform for building and query
 - Google AI API key.
 - OpenLyne API key.
 - Email service for notifications.
+- Evolution API account and key (for WhatsApp integration).
 
 This PRD will be updated as development progresses and requirements evolve.

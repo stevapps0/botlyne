@@ -3,6 +3,7 @@ from .auth import *
 from .kb import *
 from .upload import *
 from .query import *
+from .integrations import *
 
 __all__ = [
     # Auth schemas
@@ -29,4 +30,12 @@ __all__ = [
     "QueryRequest",
     "QueryResponse",
     "ConversationResponse",
+
+    # Integration schemas
+    "IntegrationCreate",
+    "IntegrationResponse",
+    "IntegrationConfig",
+    "IntegrationEvent",
+    "WhatsAppWebhookPayload",
+    "WhatsAppMessageSend",
 ]

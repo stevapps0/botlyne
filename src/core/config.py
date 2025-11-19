@@ -58,6 +58,10 @@ class Settings:
     # API Configuration
     API_BASE_URL: str = os.getenv("API_BASE_URL", "http://localhost:8000")
 
+    # Evolution API Configuration (for WhatsApp integration)
+    EVOLUTION_API_BASE_URL: str = os.getenv("EVOLUTION_API_BASE_URL", "https://evolution-api.sliplane.app")
+    EVOLUTION_API_GLOBAL_KEY: str = os.getenv("EVOLUTION_API_GLOBAL_KEY", "")
+
 
 # Global settings instance
 settings = Settings()
