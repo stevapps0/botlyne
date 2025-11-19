@@ -35,6 +35,22 @@ class AgentResponse(BaseModel):
         le=1.0,
         description="Confidence score (0-1) for response quality"
     )
+    should_escalate: bool = Field(
+        default=False,
+        description="Whether this query should be escalated to human support"
+    )
+    escalation_reason: Optional[str] = Field(
+        None,
+        description="Reason for escalation if should_escalate is True"
+    )
+    needs_email: bool = Field(
+        default=False,
+        description="Whether email collection is needed before escalation"
+    )
+    customer_email: Optional[str] = Field(
+        None,
+        description="Customer email collected for escalation"
+    )
 
 
 class QueryContext(BaseModel):
@@ -45,3 +61,12 @@ class QueryContext(BaseModel):
     kb_id: Optional[str] = None
     relevant_docs: Optional[list[dict]] = None
     conversation_history: Optional[list[dict]] = None
+
+
+class ReviewResult(BaseModel):
+    """Result from review agent validation."""
+    approved: bool = Field(description="Whether the response is approved")
+    reviewed_response: str = Field(description="The reviewed/modified response")
+    review_notes: Optional[str] = Field(None, description="Notes from the review process")
+    safety_score: float = Field(ge=0.0, le=1.0, description="Safety score (0-1)")
+    quality_score: float = Field(ge=0.0, le=1.0, description="Quality score (0-1)")

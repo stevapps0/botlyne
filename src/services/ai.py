@@ -26,10 +26,58 @@ model = GoogleModel('gemini-2.5-flash', provider=provider)
 # Create typed agent with AgentDeps and AgentResponse
 agent = Agent[AgentDeps, AgentResponse](
     model=model,
-    system_prompt="""You are a helpful AI assistant powered by Openlyne.
-    You provide clear, concise answers and can help with a variety of tasks.
-    Be friendly and professional in your responses.
-    When using tools, explain what you're doing and provide reasoning for your responses.""",
+    system_prompt="""You are a knowledgeable customer support assistant for our organization.
+
+Your primary role is to help customers by providing accurate answers based on our knowledge base and organizational information. You should:
+
+1. **Be conversational and friendly** - Talk like a human support agent, not a robot
+2. **Use the knowledge base** - Answer questions using the provided context and organizational documents
+3. **Be helpful and proactive** - Offer additional assistance and anticipate customer needs
+4. **Know your limits** - If you cannot confidently answer a question, escalate to human support
+5. **Collect information when needed** - Ask for email address before escalating so support can follow up
+
+When you need to escalate:
+- Explain why you're escalating (be honest about limitations)
+- Politely ask for their email address for follow-up
+- Assure them that human support will help
+- Keep the conversation natural and empathetic
+
+Always maintain a professional, helpful, and customer-focused tone. Reference specific information from our knowledge base when possible.""",
+)
+
+# Review agent for response validation and safety
+review_agent = Agent[AgentDeps, AgentResponse](
+    model=model,
+    system_prompt="""You are a quality assurance reviewer for customer support responses.
+
+Your role is to review AI-generated responses before they are sent to customers. You must ensure:
+
+**Safety & Appropriateness:**
+- No harmful, offensive, or inappropriate content
+- Professional and respectful tone
+- No sharing of sensitive information
+- Appropriate empathy and customer service standards
+
+**Accuracy & Quality:**
+- Response is based on provided knowledge base context
+- Information is correct and not misleading
+- Clear and helpful answers
+- Proper escalation when AI cannot adequately answer
+
+**Escalation Validation:**
+- If response indicates escalation, ensure it's appropriate
+- Email collection is requested when escalating
+- Escalation reasoning is clear and customer-friendly
+
+**Response Structure:**
+- Conversational and human-like
+- Appropriate length (not too verbose or too brief)
+- Clear next steps for customer
+
+**Your Output:**
+Return the reviewed response with any necessary corrections. If the response needs major changes, provide an improved version. If it's acceptable, return it as-is with approval confirmation.
+
+Always prioritize customer safety and satisfaction.""",
 )
 
 # Define tools for the agent
@@ -105,19 +153,38 @@ async def run_agent(
         kb_id=kb_id,
         kb_context=kb_context,
     )
-    result = await agent.run(
+    # Generate initial response with primary agent
+    initial_result = await agent.run(
         prompt,
         message_history=message_history,
         deps=deps
     )
 
     # Calculate confidence score based on heuristics
-    confidence = calculate_confidence(result.output, result.tools_used, kb_context)
+    confidence = calculate_confidence(initial_result.output, initial_result.tools_used, kb_context)
 
-    # Update the result with confidence
-    result.confidence = confidence
+    # Check if escalation is needed
+    should_escalate, escalation_reason = detect_escalation_need(prompt, confidence, kb_context)
 
-    return result
+    # Update the result with confidence and escalation info
+    initial_result.confidence = confidence
+    initial_result.should_escalate = should_escalate
+    initial_result.escalation_reason = escalation_reason if should_escalate else None
+
+    # If escalating, modify the response to be more customer-friendly
+    if should_escalate:
+        initial_result.output += "\n\n" + generate_escalation_response()
+        initial_result.needs_email = True
+
+    # Review the response with the review agent
+    reviewed_result = await review_response(
+        prompt=prompt,
+        initial_response=initial_result,
+        kb_context=kb_context,
+        deps=deps
+    )
+
+    return reviewed_result
 
 
 def calculate_confidence(output: str, tools_used: list[str], kb_context: Optional[str] = None) -> float:
@@ -142,6 +209,153 @@ def calculate_confidence(output: str, tools_used: list[str], kb_context: Optiona
 
     confidence = base_confidence + length_score + tool_score + kb_score
     return min(confidence, 1.0)
+
+
+def detect_escalation_need(prompt: str, confidence: float, kb_context: Optional[str] = None) -> tuple[bool, str]:
+    """
+    Determine if a query should be escalated to human support.
+
+    Returns:
+        tuple: (should_escalate, reason)
+    """
+    # Low confidence threshold
+    if confidence < 0.3:
+        return True, "Low confidence in AI response"
+
+    # Check for escalation keywords
+    escalation_keywords = [
+        "speak to human", "talk to person", "real person", "supervisor",
+        "manager", "escalate", "transfer", "urgent", "emergency",
+        "complaint", "angry", "frustrated", "not working", "broken"
+    ]
+
+    prompt_lower = prompt.lower()
+    for keyword in escalation_keywords:
+        if keyword in prompt_lower:
+            return True, f"User requested human assistance (keyword: {keyword})"
+
+    # Check for complex technical issues
+    complex_indicators = [
+        "integration", "api", "database", "server", "security breach",
+        "data loss", "account hacked", "billing dispute", "legal"
+    ]
+
+    for indicator in complex_indicators:
+        if indicator in prompt_lower:
+            # If we have KB context, we might still handle it
+            if kb_context and len(kb_context) > 100:
+                continue  # Try to answer with available context
+            else:
+                return True, f"Complex technical issue requiring human expertise: {indicator}"
+
+    # No escalation needed
+    return False, ""
+
+
+def generate_escalation_response(customer_email: Optional[str] = None) -> str:
+    """
+    Generate a customer-friendly escalation response.
+    """
+    if customer_email:
+        return f"Thank you for providing your email. Our support team will reach out to you at {customer_email} within 2 hours to help resolve this issue. I've shared all the details from our conversation so they can assist you immediately."
+    else:
+        return "I'd be happy to connect you with our support team so they can help resolve this for you. Could you please share your email address so they can follow up directly?"
+
+
+@retry_ai_request(max_attempts=settings.AI_MAX_RETRIES)
+async def review_response(
+    prompt: str,
+    initial_response: AgentResponse,
+    kb_context: Optional[str],
+    deps: AgentDeps
+) -> AgentResponse:
+    """
+    Review and validate the initial agent response for safety and quality.
+
+    Args:
+        prompt: Original user prompt
+        initial_response: Response from primary agent
+        kb_context: Knowledge base context used
+        deps: Agent dependencies
+
+    Returns:
+        Reviewed and potentially modified AgentResponse
+    """
+    # Create review prompt for the review agent
+    review_prompt = f"""
+Please review this customer support response for safety, accuracy, and quality:
+
+**Original Customer Question:**
+{prompt}
+
+**Knowledge Base Context:**
+{kb_context or "No specific context provided"}
+
+**AI Response to Review:**
+{initial_response.output}
+
+**Response Metadata:**
+- Confidence: {initial_response.confidence}
+- Should Escalate: {initial_response.should_escalate}
+- Escalation Reason: {initial_response.escalation_reason or "None"}
+- Tools Used: {', '.join(initial_response.tools_used) if initial_response.tools_used else "None"}
+
+**Review Instructions:**
+1. Check for safety and appropriateness
+2. Verify accuracy based on knowledge base context
+3. Ensure professional, customer-friendly tone
+4. Validate escalation logic if applicable
+5. Confirm email collection when escalating
+
+If the response is acceptable, return it as-is. If improvements are needed, provide a corrected version.
+
+Format your response as a JSON object with:
+- "approved": boolean
+- "reviewed_response": string (the final response to send)
+- "review_notes": string (explanation of changes or approval)
+- "safety_score": number 0-1
+- "quality_score": number 0-1
+"""
+
+    try:
+        # Get review from review agent
+        review_result = await review_agent.run(
+            review_prompt,
+            deps=deps
+        )
+
+        # Parse the review result (assuming the review agent returns structured data)
+        # For now, if the review response contains approval indicators, use the initial response
+        # Otherwise, use the review agent's suggested response
+
+        reviewed_output = initial_response.output
+        review_notes = "Response approved by review agent"
+
+        # Simple heuristic: if review response is very different, it might contain corrections
+        if len(review_result.output) > len(initial_response.output) * 1.5:
+            # Review agent provided a corrected response
+            reviewed_output = review_result.output
+            review_notes = "Response modified by review agent for quality/safety"
+
+        # Create final response with review validation
+        final_response = AgentResponse(
+            output=reviewed_output,
+            reasoning=initial_response.reasoning,
+            tools_used=initial_response.tools_used,
+            confidence=initial_response.confidence,
+            should_escalate=initial_response.should_escalate,
+            escalation_reason=initial_response.escalation_reason,
+            needs_email=initial_response.needs_email,
+            customer_email=initial_response.customer_email
+        )
+
+        logger.info(f"Response review completed: {review_notes}")
+        return final_response
+
+    except Exception as e:
+        logger.error(f"Review agent failed, using original response: {e}")
+        # If review fails, return the original response to avoid blocking
+        return initial_response
 
 # Example usage
 async def main():

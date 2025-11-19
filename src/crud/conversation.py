@@ -50,13 +50,37 @@ class ConversationCRUD:
     async def update_conversation_status(conv_id: UUID, status: str) -> bool:
         """Update conversation status."""
         try:
-            supabase.table("conversations").update({
+            update_data = {
                 "status": status,
                 "resolved_at": datetime.utcnow().isoformat() if status.startswith("resolved") else None
-            }).eq("id", str(conv_id)).execute()
+            }
+            supabase.table("conversations").update(update_data).eq("id", str(conv_id)).execute()
             return True
         except Exception as e:
             logger.error(f"Error updating conversation {conv_id}: {e}")
+            return False
+
+    @staticmethod
+    async def update_escalation_status(
+        conv_id: UUID,
+        escalation_status: str,
+        customer_email: Optional[str] = None,
+        escalated_by: str = "ai"
+    ) -> bool:
+        """Update conversation escalation information."""
+        try:
+            update_data = {
+                "escalation_status": escalation_status,
+                "escalated_at": datetime.utcnow().isoformat(),
+                "escalated_by": escalated_by
+            }
+            if customer_email:
+                update_data["customer_email"] = customer_email
+
+            supabase.table("conversations").update(update_data).eq("id", str(conv_id)).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error updating escalation status for conversation {conv_id}: {e}")
             return False
 
     @staticmethod

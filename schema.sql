@@ -317,7 +317,11 @@ CREATE TABLE IF NOT EXISTS "public"."conversations" (
     "kb_id" "uuid" NOT NULL,
     "status" "public"."conversation_status" DEFAULT 'ongoing'::"public"."conversation_status",
     "started_at" timestamp with time zone DEFAULT "now"(),
-    "resolved_at" timestamp with time zone
+    "resolved_at" timestamp with time zone,
+    "escalation_status" "text" DEFAULT 'active',
+    "customer_email" "text",
+    "escalated_at" timestamp with time zone,
+    "escalated_by" "text"
 );
 
 

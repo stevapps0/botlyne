@@ -102,13 +102,27 @@ class AIService:
             if conv_id:
                 await MessageCRUD.create_message(conv_id, "ai", response.output)
 
+                # Handle escalation if needed
+                if response.should_escalate:
+                    await ConversationCRUD.update_escalation_status(
+                        conv_id=conv_id,
+                        escalation_status="escalating",
+                        escalated_by="ai"
+                    )
+
+                    # Update metrics to reflect handoff
+                    await MetricsCRUD.update_metrics(
+                        conv_id=conv_id,
+                        handoff_triggered=True
+                    )
+
                 # Record metrics
                 response_time = time.time() - start_time
                 await MetricsCRUD.create_metrics(
                     conv_id=conv_id,
                     response_time=response_time,
                     ai_responses=1,
-                    handoff_triggered=False  # Could be determined by response content
+                    handoff_triggered=response.should_escalate
                 )
 
             logger.info(
@@ -186,3 +200,70 @@ class AIService:
             kb_context=context,
             history=history,
         )
+
+    @staticmethod
+    async def collect_customer_email(
+        conv_id: str,
+        customer_email: str,
+        user_id: str
+    ) -> dict:
+        """
+        Collect customer email and complete escalation process.
+
+        Args:
+            conv_id: Conversation ID
+            customer_email: Customer's email address
+            user_id: User ID for validation
+
+        Returns:
+            dict: Status and confirmation message
+        """
+        try:
+            # Validate email format (basic check)
+            import re
+            if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', customer_email):
+                return {
+                    "success": False,
+                    "message": "Please provide a valid email address."
+                }
+
+            # Update conversation with email and mark as escalated
+            success = await ConversationCRUD.update_escalation_status(
+                conv_id=UUID(conv_id),
+                escalation_status="escalated",
+                customer_email=customer_email,
+                escalated_by="ai"
+            )
+
+            if success:
+                # Send notification to support team (placeholder for now)
+                await AIService._notify_support_team(conv_id, customer_email)
+
+                return {
+                    "success": True,
+                    "message": f"Thank you. Our support team will reach out to you at {customer_email} within 2 hours."
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": "Sorry, there was an issue processing your email. Please try again."
+                }
+
+        except Exception as e:
+            logger.error(f"Error collecting email for conversation {conv_id}: {e}")
+            return {
+                "success": False,
+                "message": "Sorry, there was an error. Please try again or contact support directly."
+            }
+
+    @staticmethod
+    async def _notify_support_team(conv_id: str, customer_email: str) -> None:
+        """
+        Notify support team about escalated conversation.
+        This is a placeholder - in production, this would send emails/SMS/notifications.
+        """
+        try:
+            logger.info(f"Support notification: Conversation {conv_id} escalated, customer email: {customer_email}")
+            # TODO: Implement actual notification system (email, Slack, etc.)
+        except Exception as e:
+            logger.error(f"Error notifying support team: {e}")
