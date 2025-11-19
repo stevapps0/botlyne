@@ -10,7 +10,7 @@ import sympy as sp
 
 from src.core.config import settings
 from src.core.retry_utils import retry_ai_request
-from src.services.ai_models import AgentDeps, AgentResponse
+from src.services.ai_models import AgentDeps, AgentResponse, ReviewResult
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ Always maintain a professional, helpful, and customer-focused tone. Reference sp
 )
 
 # Review agent for response validation and safety
-review_agent = Agent[AgentDeps, AgentResponse](
+review_agent = Agent[AgentDeps, ReviewResult](
     model=model,
     system_prompt="""You are a quality assurance reviewer for customer support responses.
 
@@ -74,8 +74,8 @@ Your role is to review AI-generated responses before they are sent to customers.
 - Appropriate length (not too verbose or too brief)
 - Clear next steps for customer
 
-**Your Output:**
-Return the reviewed response with any necessary corrections. If the response needs major changes, provide an improved version. If it's acceptable, return it as-is with approval confirmation.
+**Your Task:**
+Review the provided AI response and return a structured assessment. If the response needs changes, provide an improved version. If it's acceptable, approve it as-is.
 
 Always prioritize customer safety and satisfaction.""",
 )
@@ -160,26 +160,34 @@ async def run_agent(
         deps=deps
     )
 
+    # Extract tools_used safely (pydantic_ai API may vary)
+    tools_used = getattr(initial_result, 'tools_used', []) or []
+
     # Calculate confidence score based on heuristics
-    confidence = calculate_confidence(initial_result.output, initial_result.tools_used, kb_context)
+    confidence = calculate_confidence(initial_result.output, tools_used, kb_context)
 
     # Check if escalation is needed
     should_escalate, escalation_reason = detect_escalation_need(prompt, confidence, kb_context)
 
-    # Update the result with confidence and escalation info
-    initial_result.confidence = confidence
-    initial_result.should_escalate = should_escalate
-    initial_result.escalation_reason = escalation_reason if should_escalate else None
+    # Create AgentResponse with the result data
+    initial_response = AgentResponse(
+        output=initial_result.output,
+        reasoning=getattr(initial_result, 'reasoning', None),
+        tools_used=tools_used,
+        confidence=confidence,
+        should_escalate=should_escalate,
+        escalation_reason=escalation_reason if should_escalate else None,
+        needs_email=should_escalate,  # If escalating, we need email
+    )
 
     # If escalating, modify the response to be more customer-friendly
     if should_escalate:
-        initial_result.output += "\n\n" + generate_escalation_response()
-        initial_result.needs_email = True
+        initial_response.output += "\n\n" + generate_escalation_response()
 
     # Review the response with the review agent
     reviewed_result = await review_response(
         prompt=prompt,
-        initial_response=initial_result,
+        initial_response=initial_response,
         kb_context=kb_context,
         deps=deps
     )
@@ -309,12 +317,7 @@ Please review this customer support response for safety, accuracy, and quality:
 
 If the response is acceptable, return it as-is. If improvements are needed, provide a corrected version.
 
-Format your response as a JSON object with:
-- "approved": boolean
-- "reviewed_response": string (the final response to send)
-- "review_notes": string (explanation of changes or approval)
-- "safety_score": number 0-1
-- "quality_score": number 0-1
+Your assessment will be automatically structured with approval status, reviewed response, review notes, safety score, and quality score.
 """
 
     try:
@@ -324,18 +327,15 @@ Format your response as a JSON object with:
             deps=deps
         )
 
-        # Parse the review result (assuming the review agent returns structured data)
-        # For now, if the review response contains approval indicators, use the initial response
-        # Otherwise, use the review agent's suggested response
-
-        reviewed_output = initial_response.output
-        review_notes = "Response approved by review agent"
-
-        # Simple heuristic: if review response is very different, it might contain corrections
-        if len(review_result.output) > len(initial_response.output) * 1.5:
-            # Review agent provided a corrected response
-            reviewed_output = review_result.output
-            review_notes = "Response modified by review agent for quality/safety"
+        # review_result is now a ReviewResult object with structured data
+        if review_result.approved:
+            reviewed_output = review_result.reviewed_response
+            review_notes = f"Response approved by review agent: {review_result.review_notes or 'Approved'}"
+        else:
+            # If not approved, use original response but log the issue
+            reviewed_output = initial_response.output
+            review_notes = f"Response rejected by review agent: {review_result.review_notes or 'Rejected'}"
+            logger.warning(f"Review agent rejected response: {review_notes}")
 
         # Create final response with review validation
         final_response = AgentResponse(
