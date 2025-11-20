@@ -75,8 +75,12 @@ async def create_integration(
     try:
         logger.info(f"Creating {data.type} integration for org {current_user.org_id}")
 
-        # Generate unique instance name for WhatsApp
-        instance_name = f"{current_user.org_id}_{data.type}_{str(uuid.uuid4())[:8]}"
+        # Get org shortcode for cleaner instance name
+        org_result = supabase.table("organizations").select("shortcode").eq("id", current_user.org_id).single().execute()
+        org_shortcode = org_result.data["shortcode"] if org_result.data else current_user.org_id[:8]
+
+        # Generate instance name using org shortcode (consistent for org)
+        instance_name = f"{org_shortcode}_{data.type}"
 
         # Create integration record
         integration_data = {
@@ -94,9 +98,30 @@ async def create_integration(
         # Handle type-specific setup
         if data.type == "whatsapp":
             try:
+                # Check if org already has a WhatsApp integration
+                existing_integration = supabase.table("integrations").select("*").eq("org_id", current_user.org_id).eq("type", "whatsapp").eq("status", "active").execute()
+
+                if existing_integration.data and len(existing_integration.data) > 0:
+                    logger.warning(f"Organization {current_user.org_id} already has an active WhatsApp integration")
+                    raise HTTPException(status_code=400, detail="Organization already has an active WhatsApp integration. Delete the existing one first.")
+
                 # Create Evolution API instance
                 evolution_result = await evolution_api_client.create_instance(instance_name)
-                api_key = evolution_result.get("hash", {}).get("apikey", "")
+                logger.info(f"Evolution result type: {type(evolution_result)}, value: {evolution_result}")
+
+                # Handle different response formats
+                if isinstance(evolution_result, dict):
+                    hash_value = evolution_result.get("hash")
+                    if isinstance(hash_value, dict):
+                        api_key = hash_value.get("apikey", "")
+                    elif isinstance(hash_value, str):
+                        # Evolution API returns hash as the API key string
+                        api_key = hash_value
+                    else:
+                        api_key = ""
+                else:
+                    # Evolution API returns string or other format
+                    api_key = ""  # Use global key for all operations
 
                 # Generate webhook URL and secret
                 webhook_url = f"{settings.API_BASE_URL}/api/v1/integrations/webhook/{integration_id}"
@@ -353,11 +378,21 @@ async def get_qr_code(
 
         # Get QR code from Evolution API
         qr_result = await evolution_api_client.get_qr_code(instance_name)
+        logger.info(f"QR result from Evolution API: {qr_result}")
+
+        # Format response for frontend - Evolution API already provides base64!
+        formatted_qr = {
+            "code": qr_result.get("code", ""),
+            "pairingCode": qr_result.get("pairingCode", ""),
+            "base64": qr_result.get("base64", ""),  # Evolution API provides this!
+            "ascii": "",   # TODO: Generate ASCII QR code if needed
+            "url": ""      # TODO: Generate QR code URL if needed
+        }
 
         return APIResponse(
             success=True,
             message="QR code retrieved successfully",
-            data={"qr_code": qr_result}
+            data={"qr_code": formatted_qr}
         )
 
     except HTTPException:

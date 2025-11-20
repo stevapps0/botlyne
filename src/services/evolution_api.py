@@ -37,12 +37,18 @@ class EvolutionAPIClient:
                 elif method.upper() == 'POST':
                     response = await client.post(url, headers=headers, json=data)
                 elif method.upper() == 'DELETE':
-                    response = await client.delete(url, headers=headers, json=data)
+                    response = await client.delete(url, headers=headers)
                 else:
                     raise ValueError(f"Unsupported HTTP method: {method}")
 
                 response.raise_for_status()
-                return response.json()
+
+                # Try to parse as JSON, fallback to text if not JSON
+                try:
+                    return response.json()
+                except ValueError:
+                    # Response is not JSON, return as text
+                    return response.text
 
             except httpx.HTTPStatusError as e:
                 logger.error(f"Evolution API error: {e.response.status_code} - {e.response.text}")
@@ -56,17 +62,25 @@ class EvolutionAPIClient:
         logger.info(f"Creating Evolution API instance: {instance_name}")
         data = {
             "instanceName": instance_name,
-            "token": self.global_key,
-            "qrcode": True
+            "integration": "WHATSAPP-BAILEYS",
+            "token": self.global_key
         }
         result = await self._make_request('POST', '/instance/create', data)
         logger.info(f"Instance {instance_name} created successfully")
-        return result
+
+        # Handle case where result might be a string or dict
+        if isinstance(result, str):
+            # Some Evolution API versions return success message as string
+            return {"instanceName": instance_name, "status": "created"}
+        elif isinstance(result, dict):
+            return result
+        else:
+            return {"instanceName": instance_name}
 
     async def get_qr_code(self, instance_name: str) -> Dict[str, Any]:
-        """Get QR code for WhatsApp instance."""
-        logger.info(f"Getting QR code for instance: {instance_name}")
-        result = await self._make_request('GET', f'/instance/qrCode/{instance_name}')
+        """Get QR code/connection info for WhatsApp instance."""
+        logger.info(f"Getting connection info for instance: {instance_name}")
+        result = await self._make_request('GET', f'/instance/connect/{instance_name}')
         return result
 
     async def set_webhook(
@@ -78,14 +92,16 @@ class EvolutionAPIClient:
         """Set webhook URL for instance."""
         logger.info(f"Setting webhook for instance {instance_name}: {webhook_url}")
         data = {
-            "webhook": webhook_url,
-            "enabled": True
+            "webhook": {
+                "url": webhook_url,
+                "enabled": True
+            }
         }
         if secret:
-            data["webhook_by_events"] = True
-            data["events"] = ["MESSAGES_UPSERT"]
+            data["webhook"]["byEvents"] = True
+            data["webhook"]["events"] = ["MESSAGES_UPSERT"]
 
-        result = await self._make_request('POST', f'/instance/setWebhook/{instance_name}', data)
+        result = await self._make_request('POST', f'/webhook/set/{instance_name}', data)
         logger.info(f"Webhook set for instance {instance_name}")
         return result
 
