@@ -145,9 +145,9 @@ class MetricsCRUD:
         ai_responses: int = 0,
         handoff_triggered: bool = False
     ) -> Optional[UUID]:
-        """Create metrics entry for a conversation."""
+        """Create or update metrics entry for a conversation."""
         try:
-            result = supabase.table("metrics").insert({
+            result = supabase.table("metrics").upsert({
                 "conv_id": str(conv_id),
                 "response_time": response_time,
                 "resolution_time": resolution_time,
@@ -155,13 +155,13 @@ class MetricsCRUD:
                 "ai_responses": ai_responses,
                 "handoff_triggered": handoff_triggered,
                 "created_at": datetime.utcnow().isoformat()
-            }).execute()
+            }, on_conflict="conv_id").execute()
 
             if result.data:
                 return UUID(result.data[0]["id"])
             return None
         except Exception as e:
-            logger.error(f"Error creating metrics: {e}")
+            logger.error(f"Error upserting metrics: {e}")
             return None
 
     @staticmethod
