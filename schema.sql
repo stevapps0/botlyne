@@ -1831,7 +1831,7 @@ CREATE OR REPLACE FUNCTION public.match_documents(
 RETURNS TABLE(id uuid, content text, metadata jsonb, similarity float)
 LANGUAGE sql
 SECURITY DEFINER
-AS $$
+AS $
     SELECT
         d.id,
         d.content,
@@ -1841,7 +1841,630 @@ AS $$
     WHERE d.kb_id = match_documents.kb_id
     ORDER BY d.embedding <=> query_embedding
     LIMIT match_count;
-$$;
+$;
+
+-- =============================================
+-- PRODUCTION READINESS - DATABASE TRIGGERS
+-- =============================================
+
+-- Create audit log table
+CREATE TABLE IF NOT EXISTS "public"."audit_logs" (
+    "id" uuid DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "table_name" text NOT NULL,
+    "record_id" uuid NOT NULL,
+    "operation" text NOT NULL CHECK (operation IN ('INSERT', 'UPDATE', 'DELETE')),
+    "old_values" jsonb,
+    "new_values" jsonb,
+    "user_id" uuid,
+    "org_id" uuid,
+    "timestamp" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "ip_address" text,
+    "user_agent" text
+);
+
+ALTER TABLE "public"."audit_logs" OWNER TO "postgres";
+
+-- Create index for audit logs
+CREATE INDEX IF NOT EXISTS "idx_audit_logs_table_record" ON "public"."audit_logs" USING "btree" ("table_name", "record_id");
+CREATE INDEX IF NOT EXISTS "idx_audit_logs_timestamp" ON "public"."audit_logs" USING "btree" ("timestamp");
+CREATE INDEX IF NOT EXISTS "idx_audit_logs_org_id" ON "public"."audit_logs" USING "btree" ("org_id");
+
+-- Enable RLS on audit logs
+ALTER TABLE "public"."audit_logs" ENABLE ROW LEVEL SECURITY;
+
+-- Function to clean up abandoned conversations (24h timeout)
+CREATE OR REPLACE FUNCTION "public"."cleanup_abandoned_conversations"()
+RETURNS trigger
+LANGUAGE "plpgsql" SECURITY DEFINER
+SET "search_path" TO ''
+AS $
+BEGIN
+    -- Mark conversations older than 24 hours as resolved_ai
+    UPDATE public.conversations 
+    SET 
+        status = 'resolved_ai',
+        resolved_at = CURRENT_TIMESTAMP
+    WHERE status = 'ongoing' 
+      AND started_at < CURRENT_TIMESTAMP - INTERVAL '24 hours';
+    
+    RETURN NEW;
+END;
+$;
+
+-- Function to clean up old messages (7 days for resolved conversations)
+CREATE OR REPLACE FUNCTION "public"."cleanup_old_messages"()
+RETURNS trigger
+LANGUAGE "plpgsql" SECURITY DEFINER
+SET "search_path" TO ''
+AS $
+BEGIN
+    -- Delete messages from conversations that have been resolved for more than 7 days
+    DELETE FROM public.messages 
+    WHERE conv_id IN (
+        SELECT c.id 
+        FROM public.conversations c 
+        WHERE c.status IN ('resolved_ai', 'resolved_human')
+          AND c.resolved_at < CURRENT_TIMESTAMP - INTERVAL '7 days'
+    );
+    
+    RETURN NEW;
+END;
+$;
+
+-- Function to log audit events
+CREATE OR REPLACE FUNCTION "public"."log_audit_event"()
+RETURNS trigger
+LANGUAGE "plpgsql" SECURITY DEFINER
+SET "search_path" TO ''
+AS $
+DECLARE
+    audit_user_id uuid;
+    audit_org_id uuid;
+    audit_ip text;
+    audit_user_agent text;
+BEGIN
+    -- Get user context from current auth
+    BEGIN
+        audit_user_id := (SELECT auth.uid());
+    EXCEPTION WHEN others THEN
+        audit_user_id := NULL;
+    END;
+    
+    -- For API key auth, try to get org_id from the record
+    IF audit_user_id IS NULL THEN
+        IF TG_TABLE_NAME = 'api_keys' THEN
+            audit_org_id := NEW.org_id;
+        ELSIF TG_TABLE_NAME = 'conversations' THEN
+            audit_org_id := (SELECT org_id FROM public.knowledge_bases WHERE id = NEW.kb_id);
+        ELSIF TG_TABLE_NAME = 'documents' THEN
+            audit_org_id := (SELECT org_id FROM public.knowledge_bases WHERE id = NEW.kb_id);
+        END IF;
+    END IF;
+    
+    -- Insert audit log
+    INSERT INTO public.audit_logs (
+        table_name,
+        record_id,
+        operation,
+        old_values,
+        new_values,
+        user_id,
+        org_id,
+        timestamp,
+        ip_address,
+        user_agent
+    ) VALUES (
+        TG_TABLE_NAME,
+        COALESCE(NEW.id, OLD.id),
+        TG_OP,
+        CASE WHEN TG_OP = 'DELETE' THEN to_jsonb(OLD) ELSE NULL END,
+        CASE WHEN TG_OP IN ('INSERT', 'UPDATE') THEN to_jsonb(NEW) ELSE NULL END,
+        audit_user_id,
+        audit_org_id,
+        CURRENT_TIMESTAMP,
+        current_setting('request.headers', true)::json->>'x-forwarded-for',
+        current_setting('request.headers', true)::json->>'user-agent'
+    );
+    
+    RETURN COALESCE(NEW, OLD);
+END;
+$;
+
+-- Create conversation status update trigger
+CREATE OR REPLACE FUNCTION "public"."update_conversation_metrics"()
+RETURNS trigger
+LANGUAGE "plpgsql" SECURITY DEFINER
+SET "search_path" TO ''
+AS $
+BEGIN
+    -- When conversation status changes, update metrics
+    IF TG_OP = 'UPDATE' AND NEW.status != OLD.status THEN
+        INSERT INTO public.metrics (
+            conv_id,
+            resolution_time,
+            handoff_triggered,
+            created_at
+        ) VALUES (
+            NEW.id,
+            CASE 
+                WHEN NEW.status IN ('resolved_ai', 'resolved_human') AND NEW.resolved_at IS NOT NULL 
+                THEN EXTRACT(EPOCH FROM (NEW.resolved_at - NEW.started_at))
+                ELSE NULL 
+            END,
+            CASE WHEN NEW.status = 'escalated' THEN true ELSE false END,
+            CURRENT_TIMESTAMP
+        )
+        ON CONFLICT (conv_id) DO UPDATE SET
+            resolution_time = EXCLUDED.resolution_time,
+            handoff_triggered = EXCLUDED.handoff_triggered;
+    END IF;
+    
+    RETURN NEW;
+END;
+$;
+
+-- Create triggers for audit logging on critical tables
+DROP TRIGGER IF EXISTS "audit_api_keys" ON "public"."api_keys";
+CREATE TRIGGER "audit_api_keys"
+    AFTER INSERT OR UPDATE OR DELETE ON "public"."api_keys"
+    FOR EACH ROW EXECUTE FUNCTION "public"."log_audit_event"();
+
+DROP TRIGGER IF EXISTS "audit_conversations" ON "public"."conversations";
+CREATE TRIGGER "audit_conversations"
+    AFTER INSERT OR UPDATE OR DELETE ON "public"."conversations"
+    FOR EACH ROW EXECUTE FUNCTION "public"."log_audit_event"();
+
+DROP TRIGGER IF EXISTS "audit_documents" ON "public"."documents";
+CREATE TRIGGER "audit_documents"
+    AFTER INSERT OR UPDATE OR DELETE ON "public"."documents"
+    FOR EACH ROW EXECUTE FUNCTION "public"."log_audit_event"();
+
+DROP TRIGGER IF EXISTS "audit_users" ON "public"."users";
+CREATE TRIGGER "audit_users"
+    AFTER INSERT OR UPDATE OR DELETE ON "public"."users"
+    FOR EACH ROW EXECUTE FUNCTION "public"."log_audit_event"();
+
+DROP TRIGGER IF EXISTS "audit_organizations" ON "public"."organizations";
+CREATE TRIGGER "audit_organizations"
+    AFTER INSERT OR UPDATE OR DELETE ON "public"."organizations"
+    FOR EACH ROW EXECUTE FUNCTION "public"."log_audit_event"();
+
+-- Create triggers for conversation cleanup and metrics
+DROP TRIGGER IF EXISTS "cleanup_abandoned_conversations_trigger" ON "public"."conversations";
+CREATE TRIGGER "cleanup_abandoned_conversations_trigger"
+    BEFORE INSERT OR UPDATE ON "public"."conversations"
+    FOR EACH STATEMENT EXECUTE FUNCTION "public"."cleanup_abandoned_conversations"();
+
+DROP TRIGGER IF EXISTS "cleanup_old_messages_trigger" ON "public"."messages";
+CREATE TRIGGER "cleanup_old_messages_trigger"
+    BEFORE INSERT OR UPDATE ON "public"."messages"
+    FOR EACH STATEMENT EXECUTE FUNCTION "public"."cleanup_old_messages"();
+
+DROP TRIGGER IF EXISTS "update_conversation_metrics_trigger" ON "public"."conversations";
+CREATE TRIGGER "update_conversation_metrics_trigger"
+    AFTER UPDATE ON "public"."conversations"
+    FOR EACH ROW EXECUTE FUNCTION "public"."update_conversation_metrics"();
+
+-- Create function to run maintenance tasks
+CREATE OR REPLACE FUNCTION "public"."run_maintenance_tasks"()
+RETURNS void
+LANGUAGE "plpgsql" SECURITY DEFINER
+SET "search_path" TO ''
+AS $
+BEGIN
+    -- Clean up old audit logs (keep for 90 days)
+    DELETE FROM public.audit_logs 
+    WHERE timestamp < CURRENT_TIMESTAMP - INTERVAL '90 days';
+    
+    -- Clean up old metrics (keep for 1 year)
+    DELETE FROM public.metrics 
+    WHERE created_at < CURRENT_TIMESTAMP - INTERVAL '1 year';
+    
+    -- Update table statistics for better query planning
+    ANALYZE;
+    
+    -- Log maintenance execution
+    INSERT INTO public.audit_logs (
+        table_name,
+        record_id,
+        operation,
+        new_values,
+        timestamp
+    ) VALUES (
+        'maintenance',
+        gen_random_uuid(),
+        'MAINTENANCE',
+        jsonb_build_object('task', 'run_maintenance_tasks', 'executed_at', CURRENT_TIMESTAMP),
+        CURRENT_TIMESTAMP
+    );
+END;
+$;
+
+-- Grant permissions for new functions and tables
+GRANT ALL ON FUNCTION "public"."cleanup_abandoned_conversations"() TO "anon";
+GRANT ALL ON FUNCTION "public"."cleanup_abandoned_conversations"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."cleanup_abandoned_conversations"() TO "service_role";
+
+GRANT ALL ON FUNCTION "public"."cleanup_old_messages"() TO "anon";
+GRANT ALL ON FUNCTION "public"."cleanup_old_messages"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."cleanup_old_messages"() TO "service_role";
+
+GRANT ALL ON FUNCTION "public"."log_audit_event"() TO "anon";
+GRANT ALL ON FUNCTION "public"."log_audit_event"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."log_audit_event"() TO "service_role";
+
+GRANT ALL ON FUNCTION "public"."update_conversation_metrics"() TO "anon";
+GRANT ALL ON FUNCTION "public"."update_conversation_metrics"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."update_conversation_metrics"() TO "service_role";
+
+GRANT ALL ON FUNCTION "public"."run_maintenance_tasks"() TO "anon";
+GRANT ALL ON FUNCTION "public"."run_maintenance_tasks"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."run_maintenance_tasks"() TO "service_role";
+
+GRANT ALL ON TABLE "public"."audit_logs" TO "anon";
+GRANT ALL ON TABLE "public"."audit_logs" TO "authenticated";
+GRANT ALL ON TABLE "public"."audit_logs" TO "service_role";
+
+-- =============================================
+-- INTEGRATION TABLES FOR WEBHOOK SECURITY
+-- =============================================
+
+CREATE TABLE IF NOT EXISTS "public"."integration_configs" (
+    "id" uuid DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "integration_id" uuid NOT NULL,
+    "key" text NOT NULL,
+    "value" text NOT NULL,
+    "is_secret" boolean DEFAULT false,
+    "created_at" timestamp with time zone DEFAULT "now()",
+    "updated_at" timestamp with time zone DEFAULT "now()"
+);
+
+ALTER TABLE "public"."integration_configs" OWNER TO "postgres";
+
+CREATE TABLE IF NOT EXISTS "public"."integration_events" (
+    "id" uuid DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "integration_id" uuid NOT NULL,
+    "event_type" text NOT NULL,
+    "payload" jsonb DEFAULT '{}'::jsonb,
+    "status" text DEFAULT 'pending',
+    "created_at" timestamp with time zone DEFAULT "now()",
+    "processed_at" timestamp with time zone
+);
+
+ALTER TABLE "public"."integration_events" OWNER TO "postgres";
+
+CREATE TABLE IF NOT EXISTS "public"."integrations" (
+    "id" uuid DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "org_id" uuid NOT NULL,
+    "type" text NOT NULL,
+    "name" text NOT NULL,
+    "status" text DEFAULT 'pending',
+    "kb_id" uuid NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now()",
+    "updated_at" timestamp with time zone DEFAULT "now()"
+);
+
+ALTER TABLE "public"."integrations" OWNER TO "postgres";
+
+-- Add indexes for integration tables
+CREATE INDEX IF NOT EXISTS "idx_integration_configs_integration_id" ON "public"."integration_configs" USING "btree" ("integration_id");
+CREATE INDEX IF NOT EXISTS "idx_integration_configs_key" ON "public"."integration_configs" USING "btree" ("integration_id", "key");
+CREATE INDEX IF NOT EXISTS "idx_integration_events_integration_id" ON "public"."integration_events" USING "btree" ("integration_id");
+CREATE INDEX IF NOT EXISTS "idx_integration_events_event_type" ON "public"."integration_events" USING "btree" ("event_type");
+CREATE INDEX IF NOT EXISTS "idx_integration_events_created_at" ON "public"."integration_events" USING "btree" ("created_at");
+CREATE INDEX IF NOT EXISTS "idx_integrations_org_id" ON "public"."integrations" USING "btree" ("org_id");
+CREATE INDEX IF NOT EXISTS "idx_integrations_status" ON "public"."integrations" USING "btree" ("status");
+
+-- Add foreign key constraints
+ALTER TABLE "public"."integration_configs" 
+    ADD CONSTRAINT "integration_configs_integration_id_fkey" 
+    FOREIGN KEY ("integration_id") REFERENCES "public"."integrations"("id") ON DELETE CASCADE;
+
+ALTER TABLE "public"."integration_events" 
+    ADD CONSTRAINT "integration_events_integration_id_fkey" 
+    FOREIGN KEY ("integration_id") REFERENCES "public"."integrations"("id") ON DELETE CASCADE;
+
+ALTER TABLE "public"."integrations" 
+    ADD CONSTRAINT "integrations_org_id_fkey" 
+    FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE CASCADE;
+
+ALTER TABLE "public"."integrations" 
+    ADD CONSTRAINT "integrations_kb_id_fkey" 
+    FOREIGN KEY ("kb_id") REFERENCES "public"."knowledge_bases"("id") ON DELETE CASCADE;
+
+-- Enable RLS on integration tables
+ALTER TABLE "public"."integration_configs" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."integration_events" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."integrations" ENABLE ROW LEVEL SECURITY;
+
+-- Create RLS policies for integration_configs
+CREATE POLICY "integration_configs_select" ON "public"."integration_configs" FOR SELECT TO "authenticated"
+    USING (integration_id IN (
+        SELECT i.id FROM public.integrations i 
+        JOIN public.users u ON u.org_id = i.org_id 
+        WHERE u.id = auth.uid()
+    ));
+
+CREATE POLICY "integration_configs_insert" ON "public"."integration_configs" FOR INSERT TO "authenticated"
+    WITH CHECK (integration_id IN (
+        SELECT i.id FROM public.integrations i 
+        JOIN public.users u ON u.org_id = i.org_id 
+        WHERE u.id = auth.uid()
+    ));
+
+CREATE POLICY "integration_configs_update" ON "public"."integration_configs" FOR UPDATE TO "authenticated"
+    USING (integration_id IN (
+        SELECT i.id FROM public.integrations i 
+        JOIN public.users u ON u.org_id = i.org_id 
+        WHERE u.id = auth.uid()
+    ));
+
+CREATE POLICY "integration_configs_delete" ON "public"."integration_configs" FOR DELETE TO "authenticated"
+    USING (integration_id IN (
+        SELECT i.id FROM public.integrations i 
+        JOIN public.users u ON u.org_id = i.org_id 
+        WHERE u.id = auth.uid()
+    ));
+
+-- Create RLS policies for integration_events
+CREATE POLICY "integration_events_select" ON "public"."integration_events" FOR SELECT TO "authenticated"
+    USING (integration_id IN (
+        SELECT i.id FROM public.integrations i 
+        JOIN public.users u ON u.org_id = i.org_id 
+        WHERE u.id = auth.uid()
+    ));
+
+CREATE POLICY "integration_events_insert" ON "public"."integration_events" FOR INSERT TO "authenticated"
+    WITH CHECK (integration_id IN (
+        SELECT i.id FROM public.integrations i 
+        JOIN public.users u ON u.org_id = i.org_id 
+        WHERE u.id = auth.uid()
+    ));
+
+-- Create RLS policies for integrations
+CREATE POLICY "integrations_select" ON "public"."integrations" FOR SELECT TO "authenticated"
+    USING (org_id IN (
+        SELECT u.org_id FROM public.users u WHERE u.id = auth.uid()
+    ));
+
+CREATE POLICY "integrations_insert" ON "public"."integrations" FOR INSERT TO "authenticated"
+    WITH CHECK (org_id IN (
+        SELECT u.org_id FROM public.users u WHERE u.id = auth.uid()
+    ));
+
+CREATE POLICY "integrations_update" ON "public"."integrations" FOR UPDATE TO "authenticated"
+    USING (org_id IN (
+        SELECT u.org_id FROM public.users u WHERE u.id = auth.uid()
+    ));
+
+CREATE POLICY "integrations_delete" ON "public"."integrations" FOR DELETE TO "authenticated"
+    USING (org_id IN (
+        SELECT u.org_id FROM public.users u WHERE u.id = auth.uid()
+    ));
+
+-- Grant permissions for new tables
+GRANT ALL ON TABLE "public"."integration_configs" TO "anon";
+GRANT ALL ON TABLE "public"."integration_configs" TO "authenticated";
+GRANT ALL ON TABLE "public"."integration_configs" TO "service_role";
+
+GRANT ALL ON TABLE "public"."integration_events" TO "anon";
+GRANT ALL ON TABLE "public"."integration_events" TO "authenticated";
+GRANT ALL ON TABLE "public"."integration_events" TO "service_role";
+
+GRANT ALL ON TABLE "public"."integrations" TO "anon";
+GRANT ALL ON TABLE "public"."integrations" TO "authenticated";
+GRANT ALL ON TABLE "public"."integrations" TO "service_role";
+
+-- =============================================
+-- HUMAN AGENT WORKFLOW SYSTEM
+-- =============================================
+
+CREATE TABLE IF NOT EXISTS "public"."support_agents" (
+    "id" uuid DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "user_id" uuid NOT NULL,
+    "org_id" uuid NOT NULL,
+    "name" text NOT NULL,
+    "email" text NOT NULL,
+    "role" text DEFAULT 'agent' CHECK (role IN ('agent', 'senior_agent', 'supervisor', 'admin')),
+    "status" text DEFAULT 'available' CHECK (status IN ('available', 'busy', 'offline', 'break')),
+    "max_concurrent_conversations" integer DEFAULT 3,
+    "skills" jsonb DEFAULT '[]'::jsonb,
+    "shift_start" time,
+    "shift_end" time,
+    "timezone" text DEFAULT 'UTC',
+    "is_active" boolean DEFAULT true,
+    "created_at" timestamp with time zone DEFAULT "now()",
+    "updated_at" timestamp with time zone DEFAULT "now()"
+);
+
+CREATE TABLE IF NOT EXISTS "public"."agent_assignments" (
+    "id" uuid DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "conv_id" uuid NOT NULL,
+    "agent_id" uuid NOT NULL,
+    "assigned_by" uuid,
+    "assignment_type" text DEFAULT 'manual' CHECK (assignment_type IN ('manual', 'automatic', 'escalation')),
+    "priority" text DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+    "status" text DEFAULT 'active' CHECK (status IN ('active', 'completed', 'transferred', 'escalated')),
+    "assigned_at" timestamp with time zone DEFAULT "now()",
+    "completed_at" timestamp with time zone,
+    "notes" text
+);
+
+CREATE TABLE IF NOT EXISTS "public"."agent_queue" (
+    "id" uuid DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "conv_id" uuid NOT NULL,
+    "org_id" uuid NOT NULL,
+    "kb_id" uuid,
+    "queue_position" integer,
+    "priority" text DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+    "status" text DEFAULT 'waiting' CHECK (status IN ('waiting', 'assigned', 'cancelled')),
+    "reason" text,
+    "customer_info" jsonb DEFAULT '{}'::jsonb,
+    "enqueued_at" timestamp with time zone DEFAULT "now()",
+    "assigned_at" timestamp with time zone,
+    "timeout_minutes" integer DEFAULT 30
+);
+
+CREATE TABLE IF NOT EXISTS "public"."agent_responses" (
+    "id" uuid DEFAULT "extensions"."uuid_generate_v4"() NOT NULL,
+    "conv_id" uuid NOT NULL,
+    "agent_id" uuid NOT NULL,
+    "message_type" text DEFAULT 'text' CHECK (message_type IN ('text', 'file', 'image', 'audio', 'video')),
+    "content" text NOT NULL,
+    "metadata" jsonb DEFAULT '{}'::jsonb,
+    "original_message_id" uuid,
+    "sent_at" timestamp with time zone DEFAULT "now()",
+    "delivered_at" timestamp with time zone,
+    "read_at" timestamp with time zone
+);
+
+-- Create indexes for agent system
+CREATE INDEX IF NOT EXISTS "idx_support_agents_org_id" ON "public"."support_agents" USING "btree" ("org_id");
+CREATE INDEX IF NOT EXISTS "idx_support_agents_user_id" ON "public"."support_agents" USING "btree" ("user_id");
+CREATE INDEX IF NOT EXISTS "idx_support_agents_status" ON "public"."support_agents" USING "btree" ("status");
+CREATE INDEX IF NOT EXISTS "idx_agent_assignments_conv_id" ON "public"."agent_assignments" USING "btree" ("conv_id");
+CREATE INDEX IF NOT EXISTS "idx_agent_assignments_agent_id" ON "public"."agent_assignments" USING "btree" ("agent_id");
+CREATE INDEX IF NOT EXISTS "idx_agent_assignments_status" ON "public"."agent_assignments" USING "btree" ("status");
+CREATE INDEX IF NOT EXISTS "idx_agent_queue_org_id" ON "public"."agent_queue" USING "btree" ("org_id");
+CREATE INDEX IF NOT EXISTS "idx_agent_queue_status" ON "public"."agent_queue" USING "btree" ("status");
+CREATE INDEX IF NOT EXISTS "idx_agent_queue_priority" ON "public"."agent_queue" USING "btree" ("priority");
+CREATE INDEX IF NOT EXISTS "idx_agent_queue_enqueued_at" ON "public"."agent_queue" USING "btree" ("enqueued_at");
+CREATE INDEX IF NOT EXISTS "idx_agent_responses_conv_id" ON "public"."agent_responses" USING "btree" ("conv_id");
+CREATE INDEX IF NOT EXISTS "idx_agent_responses_agent_id" ON "public"."agent_responses" USING "btree" ("agent_id");
+CREATE INDEX IF NOT EXISTS "idx_agent_responses_sent_at" ON "public"."agent_responses" USING "btree" ("sent_at");
+
+-- Add foreign key constraints
+ALTER TABLE "public"."support_agents" 
+    ADD CONSTRAINT "support_agents_user_id_fkey" 
+    FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+ALTER TABLE "public"."support_agents" 
+    ADD CONSTRAINT "support_agents_org_id_fkey" 
+    FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE CASCADE;
+
+ALTER TABLE "public"."agent_assignments" 
+    ADD CONSTRAINT "agent_assignments_conv_id_fkey" 
+    FOREIGN KEY ("conv_id") REFERENCES "public"."conversations"("id") ON DELETE CASCADE;
+
+ALTER TABLE "public"."agent_assignments" 
+    ADD CONSTRAINT "agent_assignments_agent_id_fkey" 
+    FOREIGN KEY ("agent_id") REFERENCES "public"."support_agents"("id") ON DELETE CASCADE;
+
+ALTER TABLE "public"."agent_assignments" 
+    ADD CONSTRAINT "agent_assignments_assigned_by_fkey" 
+    FOREIGN KEY ("assigned_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+ALTER TABLE "public"."agent_queue" 
+    ADD CONSTRAINT "agent_queue_conv_id_fkey" 
+    FOREIGN KEY ("conv_id") REFERENCES "public"."conversations"("id") ON DELETE CASCADE;
+
+ALTER TABLE "public"."agent_queue" 
+    ADD CONSTRAINT "agent_queue_org_id_fkey" 
+    FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE CASCADE;
+
+ALTER TABLE "public"."agent_queue" 
+    ADD CONSTRAINT "agent_queue_kb_id_fkey" 
+    FOREIGN KEY ("kb_id") REFERENCES "public"."knowledge_bases"("id") ON DELETE CASCADE;
+
+ALTER TABLE "public"."agent_responses" 
+    ADD CONSTRAINT "agent_responses_conv_id_fkey" 
+    FOREIGN KEY ("conv_id") REFERENCES "public"."conversations"("id") ON DELETE CASCADE;
+
+ALTER TABLE "public"."agent_responses" 
+    ADD CONSTRAINT "agent_responses_agent_id_fkey" 
+    FOREIGN KEY ("agent_id") REFERENCES "public"."support_agents"("id") ON DELETE CASCADE;
+
+-- Enable RLS on agent tables
+ALTER TABLE "public"."support_agents" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."agent_assignments" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."agent_queue" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."agent_responses" ENABLE ROW LEVEL SECURITY;
+
+-- Create RLS policies for support_agents
+CREATE POLICY "support_agents_select" ON "public"."support_agents" FOR SELECT TO "authenticated"
+    USING (org_id IN (
+        SELECT u.org_id FROM public.users u WHERE u.id = auth.uid()
+    ));
+
+CREATE POLICY "support_agents_insert" ON "public"."support_agents" FOR INSERT TO "authenticated"
+    WITH CHECK (org_id IN (
+        SELECT u.org_id FROM public.users u WHERE u.id = auth.uid()
+    ));
+
+CREATE POLICY "support_agents_update" ON "public"."support_agents" FOR UPDATE TO "authenticated"
+    USING (org_id IN (
+        SELECT u.org_id FROM public.users u WHERE u.id = auth.uid()
+    ));
+
+-- Create RLS policies for agent_assignments
+CREATE POLICY "agent_assignments_select" ON "public"."agent_assignments" FOR SELECT TO "authenticated"
+    USING (conv_id IN (
+        SELECT c.id FROM public.conversations c
+        JOIN public.users u ON u.id = c.user_id
+        WHERE u.org_id = (SELECT u2.org_id FROM public.users u2 WHERE u2.id = auth.uid())
+    ));
+
+CREATE POLICY "agent_assignments_insert" ON "public"."agent_assignments" FOR INSERT TO "authenticated"
+    WITH CHECK (conv_id IN (
+        SELECT c.id FROM public.conversations c
+        JOIN public.users u ON u.id = c.user_id
+        WHERE u.org_id = (SELECT u2.org_id FROM public.users u2 WHERE u2.id = auth.uid())
+    ));
+
+CREATE POLICY "agent_assignments_update" ON "public"."agent_assignments" FOR UPDATE TO "authenticated"
+    USING (conv_id IN (
+        SELECT c.id FROM public.conversations c
+        JOIN public.users u ON u.id = c.user_id
+        WHERE u.org_id = (SELECT u2.org_id FROM public.users u2 WHERE u2.id = auth.uid())
+    ));
+
+-- Create RLS policies for agent_queue
+CREATE POLICY "agent_queue_select" ON "public"."agent_queue" FOR SELECT TO "authenticated"
+    USING (org_id IN (
+        SELECT u.org_id FROM public.users u WHERE u.id = auth.uid()
+    ));
+
+CREATE POLICY "agent_queue_insert" ON "public"."agent_queue" FOR INSERT TO "authenticated"
+    WITH CHECK (org_id IN (
+        SELECT u.org_id FROM public.users u WHERE u.id = auth.uid()
+    ));
+
+CREATE POLICY "agent_queue_update" ON "public"."agent_queue" FOR UPDATE TO "authenticated"
+    USING (org_id IN (
+        SELECT u.org_id FROM public.users u WHERE u.id = auth.uid()
+    ));
+
+-- Create RLS policies for agent_responses
+CREATE POLICY "agent_responses_select" ON "public"."agent_responses" FOR SELECT TO "authenticated"
+    USING (conv_id IN (
+        SELECT c.id FROM public.conversations c
+        JOIN public.users u ON u.id = c.user_id
+        WHERE u.org_id = (SELECT u2.org_id FROM public.users u2 WHERE u2.id = auth.uid())
+    ));
+
+CREATE POLICY "agent_responses_insert" ON "public"."agent_responses" FOR INSERT TO "authenticated"
+    WITH CHECK (conv_id IN (
+        SELECT c.id FROM public.conversations c
+        JOIN public.users u ON u.id = c.user_id
+        WHERE u.org_id = (SELECT u2.org_id FROM public.users u2 WHERE u2.id = auth.uid())
+    ));
+
+-- Grant permissions for new tables
+GRANT ALL ON TABLE "public"."support_agents" TO "anon";
+GRANT ALL ON TABLE "public"."support_agents" TO "authenticated";
+GRANT ALL ON TABLE "public"."support_agents" TO "service_role";
+
+GRANT ALL ON TABLE "public"."agent_assignments" TO "anon";
+GRANT ALL ON TABLE "public"."agent_assignments" TO "authenticated";
+GRANT ALL ON TABLE "public"."agent_assignments" TO "service_role";
+
+GRANT ALL ON TABLE "public"."agent_queue" TO "anon";
+GRANT ALL ON TABLE "public"."agent_queue" TO "authenticated";
+GRANT ALL ON TABLE "public"."agent_queue" TO "service_role";
+
+GRANT ALL ON TABLE "public"."agent_responses" TO "anon";
+GRANT ALL ON TABLE "public"."agent_responses" TO "authenticated";
+GRANT ALL ON TABLE "public"."agent_responses" TO "service_role";
 
 
 

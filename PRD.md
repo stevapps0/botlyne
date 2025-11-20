@@ -165,5 +165,7 @@ To provide organizations with a secure, scalable platform for building and query
 - OpenLyne API key.
 - Email service for notifications.
 - Evolution API account and key (for WhatsApp integration).
+- Redis (optional, for production performance optimization).
+- Additional packages: slowapi, structlog, prometheus-client.
 
 This PRD will be updated as development progresses and requirements evolve.

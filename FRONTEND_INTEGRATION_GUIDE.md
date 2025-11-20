@@ -2,9 +2,68 @@
 
 This guide shows how to integrate with the Knowledge Base AI API from a frontend application. Authentication is handled entirely client-side using Supabase Auth.
 
+**New Features**: The API now includes WhatsApp integration, human agent workflows, production security features, and monitoring capabilities.
+
 ## Base URL
 ```
 http://localhost:8000
+```
+
+## Health Checks and Monitoring
+
+### 1. Basic Health Check
+
+**Request:**
+```bash
+curl -X GET "http://localhost:8000/health"
+```
+
+**Success Response (200):**
+```json
+{
+  "status": "healthy",
+  "version": "1.0.0",
+  "message": "Knowledge Base AI API is running"
+}
+```
+
+### 2. Detailed Health Check
+
+**Request:**
+```bash
+curl -X GET "http://localhost:8000/health/detailed"
+```
+
+**Success Response (200):**
+```json
+{
+  "overall_status": "healthy",
+  "timestamp": "2024-01-01T00:00:00Z",
+  "checks": {
+    "database": "healthy",
+    "ai_service": "healthy",
+    "redis": "healthy"
+  },
+  "critical_issues": []
+}
+```
+
+### 3. System Metrics
+
+**Request:**
+```bash
+curl -X GET "http://localhost:8000/metrics"
+```
+
+**Success Response (200):**
+```json
+{
+  "total_requests": 1250,
+  "active_users": 45,
+  "total_conversations": 320,
+  "average_response_time": 1.2,
+  "error_rate": 0.02
+}
 ```
 
 ## Authentication
@@ -88,35 +147,31 @@ curl -X GET "http://localhost:8000/auth/user" \
 **Failure Response (401):**
 ```json
 {
-  "detail": "Authentication failed"
+  "detail": "Invalid token or user not found"
 }
 ```
 
-### 3. Get Current User Info
+### 3. Get Onboarding Content
 
-Get authenticated user's information.
+Get onboarding welcome content for new users.
 
 **Request:**
 ```bash
-curl -X GET "http://localhost:8000/auth/user" \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+curl -X GET "http://localhost:8000/onboarding"
 ```
 
 **Success Response (200):**
 ```json
 {
-  "id": "user-uuid",
-  "email": "user@example.com",
-  "org_id": "org-uuid",
-  "role": "admin",
-  "kb_id": "kb-uuid"
-}
-```
-
-**Failure Response (401):**
-```json
-{
-  "detail": "Invalid token or user not found"
+  "title": "Welcome to Your Knowledge Base!",
+  "content": "Welcome to your new knowledge base! Here's how to get started...",
+  "steps": [
+    {
+      "title": "Upload Your First Document",
+      "description": "Add documents to your knowledge base to start asking questions.",
+      "action": "upload"
+    }
+  ]
 }
 ```
 
@@ -193,6 +248,58 @@ curl -X GET "http://localhost:8000/orgs/org-uuid/users" \
     "last_name": "Doe"
   }
 ]
+```
+
+### 4. Invite User to Organization
+
+**Request:**
+```bash
+curl -X POST "http://localhost:8000/orgs/org-uuid/invites" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "newuser@example.com",
+    "role": "member"
+  }'
+```
+
+**Success Response (200):**
+```json
+{
+  "message": "Invitation sent successfully",
+  "invite_id": "invite-uuid"
+}
+```
+
+### 5. Accept Organization Invitation
+
+**Request:**
+```bash
+curl -X POST "http://localhost:8000/accept-invite/invite-uuid"
+```
+
+**Success Response (200):**
+```json
+{
+  "redirect_url": "http://localhost:8081/signup?invite=invite-uuid",
+  "org_id": "org-uuid",
+  "role": "member"
+}
+```
+
+### 6. Leave Organization
+
+**Request:**
+```bash
+curl -X POST "http://localhost:8000/orgs/org-uuid/leave" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Success Response (200):**
+```json
+{
+  "message": "Successfully left the organization"
+}
 ```
 
 ## Knowledge Base Management
@@ -355,41 +462,6 @@ curl -X POST "http://localhost:8000/api/v1/query" \
 }
 ```
 
-### 2. List Conversations
-
-**Request:**
-```bash
-curl -X GET "http://localhost:8000/conversations" \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN"
-```
-
-**Success Response (200):**
-```json
-[
-  {
-    "id": "conv-uuid",
-    "kb_id": "kb-uuid",
-    "ticket_number": "A1B2C3",
-    "messages": [
-      {
-        "id": "msg-uuid",
-        "sender": "user",
-        "content": "What is AI?",
-        "timestamp": "2024-01-01T00:00:00Z"
-      },
-      {
-        "id": "msg-uuid-2",
-        "sender": "ai",
-        "content": "AI stands for Artificial Intelligence...",
-        "timestamp": "2024-01-01T00:00:01Z"
-      }
-    ],
-    "status": "active",
-    "started_at": "2024-01-01T00:00:00Z",
-    "resolved_at": null
-  }
-]
-```
 
 ## API Key Management
 
@@ -553,6 +625,30 @@ const queryKB = async (message, kbId = null, conversationId = null) => {
 
   return result;
 };
+
+// Health check function
+const checkHealth = async () => {
+  const response = await fetch('/health');
+  return response.json();
+};
+
+// Get detailed health status
+const getDetailedHealth = async () => {
+  const response = await fetch('/health/detailed');
+  return response.json();
+};
+
+// Get system metrics
+const getMetrics = async () => {
+  const response = await fetch('/metrics');
+  return response.json();
+};
+
+// Get onboarding content
+const getOnboardingContent = async () => {
+  const response = await fetch('/onboarding');
+  return response.json();
+};
 ```
 
 ### 3. Upload Flow
@@ -617,8 +713,8 @@ curl -X POST "http://localhost:8000/api/v1/integrations" \
           "is_secret": false
         }
       ],
-      "created_at": "2024-01-01T00:00:00Z",
-      "updated_at": "2024-01-01T00:00:00Z"
+      "created_at": "2024-01-01T00:00:00.000000+00:00",
+      "updated_at": "2024-01-01T00:00:00.000000+00:00"
     }
   }
 }
@@ -672,15 +768,60 @@ curl -X GET "http://localhost:8000/api/v1/integrations" \
         "configs": [
           {
             "key": "instance_name",
-            "value": "org-uuid_whatsapp_uuid8",
+            "value": "***",
             "is_secret": false
           }
         ],
-        "created_at": "2024-01-01T00:00:00Z",
-        "updated_at": "2024-01-01T00:00:00Z"
+        "created_at": "2024-01-01T00:00:00.000000+00:00",
+        "updated_at": "2024-01-01T00:00:00.000000+00:00"
       }
     ]
   }
+}
+```
+
+### 4. Get Integration Details
+
+**Request:**
+```bash
+curl -X GET "http://localhost:8000/api/v1/integrations/integration-uuid" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Success Response (200):**
+```json
+{
+  "success": true,
+  "message": "Integration retrieved successfully",
+  "data": {
+    "integration": {
+      "id": "integration-uuid",
+      "org_id": "org-uuid",
+      "type": "whatsapp",
+      "name": "Customer Support WhatsApp",
+      "status": "active",
+      "kb_id": "kb-uuid",
+      "configs": [...],
+      "created_at": "2024-01-01T00:00:00.000000+00:00",
+      "updated_at": "2024-01-01T00:00:00.000000+00:00"
+    }
+  }
+}
+```
+
+### 5. Delete Integration
+
+**Request:**
+```bash
+curl -X DELETE "http://localhost:8000/api/v1/integrations/integration-uuid" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Success Response (200):**
+```json
+{
+  "success": true,
+  "message": "Integration deleted successfully"
 }
 ```
 
@@ -706,6 +847,10 @@ const setupWhatsAppIntegration = async (kbId, integrationName = 'Customer Suppor
     });
 
     const createData = await createResponse.json();
+    if (!createData.success) {
+      throw new Error(createData.error || createData.message);
+    }
+
     const integrationId = createData.data.integration.id;
 
     // 2. Get QR code for setup
@@ -714,6 +859,9 @@ const setupWhatsAppIntegration = async (kbId, integrationName = 'Customer Suppor
     });
 
     const qrData = await qrResponse.json();
+    if (!qrData.success) {
+      throw new Error(qrData.error || qrData.message);
+    }
 
     // 3. Display QR code to user
     displayQRCode(qrData.data.qr_code);
@@ -729,10 +877,14 @@ const setupWhatsAppIntegration = async (kbId, integrationName = 'Customer Suppor
 
     // Check status every 5 seconds until active
     const pollStatus = setInterval(async () => {
-      const status = await checkStatus();
-      if (status === 'active') {
-        clearInterval(pollStatus);
-        showSuccessMessage('WhatsApp integration is now active!');
+      try {
+        const status = await checkStatus();
+        if (status === 'active') {
+          clearInterval(pollStatus);
+          showSuccessMessage('WhatsApp integration is now active!');
+        }
+      } catch (error) {
+        console.error('Status check failed:', error);
       }
     }, 5000);
 
@@ -740,6 +892,26 @@ const setupWhatsAppIntegration = async (kbId, integrationName = 'Customer Suppor
     console.error('WhatsApp setup failed:', error);
     showErrorMessage('Failed to setup WhatsApp integration');
   }
+};
+
+// List all integrations
+const listIntegrations = async () => {
+  const token = localStorage.getItem('token');
+  const response = await fetch('/api/v1/integrations', {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  const data = await response.json();
+  return data.data.integrations;
+};
+
+// Delete integration
+const deleteIntegration = async (integrationId) => {
+  const token = localStorage.getItem('token');
+  const response = await fetch(`/api/v1/integrations/${integrationId}`, {
+    method: 'DELETE',
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  return response.json();
 };
 
 const displayQRCode = (qrCodeData) => {

@@ -62,6 +62,25 @@ class Settings:
     EVOLUTION_API_BASE_URL: str = os.getenv("EVOLUTION_API_BASE_URL", "https://evolution-api.sliplane.app")
     EVOLUTION_API_GLOBAL_KEY: str = os.getenv("EVOLUTION_API_GLOBAL_KEY", "")
 
+    # Redis Configuration (for caching and rate limiting)
+    REDIS_URL: str = os.getenv("REDIS_URL", "")
+    
+    # Webhook Security Configuration
+    WEBHOOK_SIGNATURE_SECRET: str = os.getenv("WEBHOOK_SIGNATURE_SECRET", "")
+    ALLOWED_WEBHOOK_IPS: str = os.getenv("ALLOWED_WEBHOOK_IPS", "")  # Comma-separated list
+    
+    # Rate Limiting Configuration
+    RATE_LIMIT_REQUESTS_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_REQUESTS_PER_MINUTE", "100"))
+    RATE_LIMIT_REQUESTS_PER_HOUR: int = int(os.getenv("RATE_LIMIT_REQUESTS_PER_HOUR", "1000"))
+    
+    # Circuit Breaker Configuration
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = int(os.getenv("CIRCUIT_BREAKER_FAILURE_THRESHOLD", "5"))
+    CIRCUIT_BREAKER_TIMEOUT: int = int(os.getenv("CIRCUIT_BREAKER_TIMEOUT", "60"))
+    
+    # Logging Configuration
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    ENABLE_STRUCTURED_LOGGING: bool = os.getenv("ENABLE_STRUCTURED_LOGGING", "false").lower() == "true"
+
 
 # Global settings instance
 settings = Settings()

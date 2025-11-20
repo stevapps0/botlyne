@@ -9,3 +9,7 @@ python-multipart
 python-dotenv
 asyncpg
 sympy
+redis[hiredis]
+slowapi
+structlog
+prometheus-client
