@@ -174,6 +174,140 @@ def should_search_knowledge_base(message: str, org_context: dict) -> bool:
     return should_search
 
 
+async def search_knowledge_base(query: str, kb_id: str) -> Tuple[str, List[dict], List[dict]]:
+    """Search knowledge base and return context, sources, and relevant docs"""
+    context = ""
+    sources = []
+    relevant_docs = []
+
+    logger.info(f"🔍 KB SEARCH START - KB: {kb_id}, Query: '{query}'")
+    kb_search_start = time.time()
+    cache_key = get_cache_key(query, kb_id)
+    similar_docs = get_cached_result(cache_key)
+
+    if similar_docs is None:
+        logger.info("💾 CACHE MISS - Performing vector search")
+        similar_docs = retrieval_service.search_similar(query, kb_id=kb_id, limit=5, table_name="documents")
+        set_cached_result(cache_key, similar_docs)
+        logger.info(f"✅ VECTOR SEARCH COMPLETED - Found {len(similar_docs)} documents")
+    else:
+        logger.info(f"⚡ CACHE HIT - Using cached results: {len(similar_docs)} documents")
+
+    kb_search_time = time.time() - kb_search_start
+    logger.info(f"⏱️ KB SEARCH TOTAL TIME - {kb_search_time:.3f}s")
+
+    # Filter and optimize context
+    relevant_docs = [doc for doc in similar_docs if doc.get("similarity", 0) > settings.SIMILARITY_THRESHOLD]
+    logger.info(f"🎯 RELEVANCE FILTERING - Before: {len(similar_docs)}, After: {len(relevant_docs)}")
+
+    # Format context
+    total_context_length = 0
+    max_context_length = settings.MAX_CONTEXT_LENGTH
+    file_ids_to_fetch = []
+
+    for i, doc in enumerate(relevant_docs):
+        similarity = doc.get("similarity", 0)
+        content = doc.get("content", "")
+        metadata = doc.get("metadata", {})
+
+        potential_length = total_context_length + len(content)
+        if potential_length > max_context_length:
+            content = content[:max_context_length - total_context_length]
+
+        context += f"\n[Source] (Similarity: {similarity:.2%})\n{content}\n"
+        total_context_length += len(content)
+
+        file_id = metadata.get("file_id") if metadata else None
+        if file_id:
+            file_ids_to_fetch.append(file_id)
+
+        sources.append({
+            "file_id": file_id,
+            "title": str(metadata.get("source", "Unknown") if metadata else "Unknown"),
+            "filename": str(metadata.get("source", "Unknown") if metadata else "Unknown"),
+            "relevance_score": float(round(similarity, 2)),
+            "excerpt": str(content[:150] + "..." if len(content) > 150 else content)
+        })
+
+        if len(sources) >= settings.MAX_SOURCES_COUNT:
+            break
+
+    # Batch fetch file information
+    file_info_map = {}
+    if file_ids_to_fetch:
+        try:
+            file_result = supabase.table("files").select("id", "url", "filename").in_("id", file_ids_to_fetch).execute()
+            if file_result.data:
+                for file_data in file_result.data:
+                    file_info_map[file_data["id"]] = {
+                        "url": file_data.get("url"),
+                        "filename": file_data.get("filename", "document")
+                    }
+        except Exception as e:
+            logger.warning(f"Failed to batch fetch file info: {e}")
+
+    # Update sources with file information
+    for source in sources:
+        if source.get("file_id") and source["file_id"] in file_info_map:
+            file_info = file_info_map[source["file_id"]]
+            source["title"] = str(file_info["filename"])
+            source["filename"] = str(file_info["filename"])
+            if file_info["url"]:
+                source["url"] = str(file_info["url"])
+            else:
+                source["url"] = f"{settings.API_BASE_URL}/api/v1/files/{source['file_id']}/view"
+        else:
+            source["url"] = None
+
+        source["title"] = str(source["title"])
+        source["filename"] = str(source["filename"])
+        source["url"] = str(source["url"]) if source["url"] else None
+        source["relevance_score"] = float(source["relevance_score"])
+        source["excerpt"] = str(source["excerpt"])
+        source.pop("file_id", None)
+
+    if not context.strip():
+        context = "No relevant information found in the knowledge base."
+
+    return context, sources, relevant_docs
+
+
+async def generate_ai_response(
+    enhanced_query: str,
+    user_id: str,
+    kb_id: str,
+    relevant_docs: List[dict],
+    conversation_id: str,
+    conversation_history: List[dict],
+    org_context: dict
+) -> Tuple[str, List[str], Optional[Any]]:
+    """Generate AI response and return response text, tools used, and ai_result object"""
+    logger.info(f"🤖 AI PROCESSING START - Context length: {len(enhanced_query)}")
+    ai_start = time.time()
+    ai_result = None
+    try:
+        ai_result = await AIService.query_with_context(
+            prompt=enhanced_query,
+            user_id=user_id,
+            relevant_docs=relevant_docs,
+            session_id=conversation_id,
+            timezone="UTC",
+            kb_id=kb_id,
+            history=conversation_history,
+        )
+        ai_response = ai_result.output
+        tools_used = getattr(ai_result, 'tools_used', []) or []
+        ai_time = time.time() - ai_start
+        logger.info(f"⏱️ AI PROCESSING TIME - {ai_time:.3f}s")
+    except Exception as ai_error:
+        ai_time = time.time() - ai_start
+        logger.error(f"❌ AI SERVICE FAILED - Error: {str(ai_error)}")
+        ai_response = f"I'm sorry, I'm currently experiencing technical difficulties. As a support agent for {org_context['name']}, please try again in a moment or contact our support team if the issue persists."
+        tools_used = []
+
+    return ai_response, tools_used, ai_result
+
+
 async def get_org_context(org_id: str) -> dict:
     """Get organization details for context"""
     try:
@@ -255,107 +389,6 @@ async def process_query_request(data: QueryRequest, org_id: str, kb_id: str = No
                 logger.warning(f"🚫 CONVERSATION ACCESS DENIED - Conv: {conversation_id}, User: {effective_user_id}")
                 raise HTTPException(status_code=403, detail="Access denied")
 
-        # Conditionally search knowledge base
-        logger.info(f"🤔 ANALYZING QUERY TYPE - Message: '{data.message}'")
-        should_search_kb = should_search_knowledge_base(data.message, org_context)
-        logger.info(f"📊 KB SEARCH DECISION - Search: {should_search_kb}")
-
-        context = ""
-        sources = []
-        relevant_docs = []
-
-        if should_search_kb:
-            logger.info(f"🔍 KB SEARCH START - KB: {effective_kb_id}, Query: '{data.message}'")
-            kb_search_start = time.time()
-            cache_key = get_cache_key(data.message, effective_kb_id)
-            similar_docs = get_cached_result(cache_key)
-
-            if similar_docs is None:
-                logger.info("💾 CACHE MISS - Performing vector search")
-                similar_docs = retrieval_service.search_similar(data.message, kb_id=effective_kb_id, limit=5, table_name="documents")
-                set_cached_result(cache_key, similar_docs)
-                logger.info(f"✅ VECTOR SEARCH COMPLETED - Found {len(similar_docs)} documents")
-            else:
-                logger.info(f"⚡ CACHE HIT - Using cached results: {len(similar_docs)} documents")
-
-            kb_search_time = time.time() - kb_search_start
-            logger.info(f"⏱️ KB SEARCH TOTAL TIME - {kb_search_time:.3f}s")
-
-            # Filter and optimize context
-            relevant_docs = [doc for doc in similar_docs if doc.get("similarity", 0) > settings.SIMILARITY_THRESHOLD]
-            logger.info(f"🎯 RELEVANCE FILTERING - Before: {len(similar_docs)}, After: {len(relevant_docs)}")
-
-            # Format context
-            total_context_length = 0
-            max_context_length = settings.MAX_CONTEXT_LENGTH
-            file_ids_to_fetch = []
-
-            for i, doc in enumerate(relevant_docs):
-                similarity = doc.get("similarity", 0)
-                content = doc.get("content", "")
-                metadata = doc.get("metadata", {})
-
-                potential_length = total_context_length + len(content)
-                if potential_length > max_context_length:
-                    content = content[:max_context_length - total_context_length]
-
-                context += f"\n[Source] (Similarity: {similarity:.2%})\n{content}\n"
-                total_context_length += len(content)
-
-                file_id = metadata.get("file_id") if metadata else None
-                if file_id:
-                    file_ids_to_fetch.append(file_id)
-
-                sources.append({
-                    "file_id": file_id,
-                    "title": str(metadata.get("source", "Unknown") if metadata else "Unknown"),
-                    "filename": str(metadata.get("source", "Unknown") if metadata else "Unknown"),
-                    "relevance_score": float(round(similarity, 2)),
-                    "excerpt": str(content[:150] + "..." if len(content) > 150 else content)
-                })
-
-                if len(sources) >= settings.MAX_SOURCES_COUNT:
-                    break
-
-            # Batch fetch file information
-            file_info_map = {}
-            if file_ids_to_fetch:
-                try:
-                    file_result = supabase.table("files").select("id", "url", "filename").in_("id", file_ids_to_fetch).execute()
-                    if file_result.data:
-                        for file_data in file_result.data:
-                            file_info_map[file_data["id"]] = {
-                                "url": file_data.get("url"),
-                                "filename": file_data.get("filename", "document")
-                            }
-                except Exception as e:
-                    logger.warning(f"Failed to batch fetch file info: {e}")
-
-            # Update sources with file information
-            for source in sources:
-                if source.get("file_id") and source["file_id"] in file_info_map:
-                    file_info = file_info_map[source["file_id"]]
-                    source["title"] = str(file_info["filename"])
-                    source["filename"] = str(file_info["filename"])
-                    if file_info["url"]:
-                        source["url"] = str(file_info["url"])
-                    else:
-                        source["url"] = f"{settings.API_BASE_URL}/api/v1/files/{source['file_id']}/view"
-                else:
-                    source["url"] = None
-
-                source["title"] = str(source["title"])
-                source["filename"] = str(source["filename"])
-                source["url"] = str(source["url"]) if source["url"] else None
-                source["relevance_score"] = float(source["relevance_score"])
-                source["excerpt"] = str(source["excerpt"])
-                source.pop("file_id", None)
-
-            if not context.strip():
-                context = "No relevant information found in the knowledge base."
-        else:
-            context = f"You are a customer support agent for {org_context['name']}. The user sent a conversational message that doesn't require knowledge base lookup."
-
         # Get conversation history
         conversation_history = []
         if conversation_id:
@@ -370,6 +403,20 @@ async def process_query_request(data: QueryRequest, org_id: str, kb_id: str = No
                     })
             except Exception as e:
                 logger.warning(f"Failed to load conversation history: {e}")
+
+        # Conditionally search knowledge base initially
+        logger.info(f"🤔 ANALYZING QUERY TYPE - Message: '{data.message}'")
+        should_search_kb = should_search_knowledge_base(data.message, org_context)
+        logger.info(f"📊 KB SEARCH DECISION - Search: {should_search_kb}")
+
+        context = ""
+        sources = []
+        relevant_docs = []
+
+        if should_search_kb:
+            context, sources, relevant_docs = await search_knowledge_base(data.message, effective_kb_id)
+        else:
+            context = f"You are a customer support agent for {org_context['name']}. The user sent a conversational message that doesn't require knowledge base lookup."
 
         # Build enhanced query
         org_info = f"Organization: {org_context['name']}"
@@ -386,34 +433,42 @@ User Message: {data.message}
 
 Respond professionally and helpfully as a support agent for {org_context['name']}."""
 
-        # Generate AI response
-        logger.info(f"🤖 AI PROCESSING START - Context length: {len(context)}")
-        ai_start = time.time()
-        ai_result = None
-        try:
-            ai_result = await AIService.query_with_context(
-                prompt=enhanced_query,
-                user_id=effective_user_id,
-                relevant_docs=relevant_docs if should_search_kb else [],
-                session_id=conversation_id,
-                timezone="UTC",
-                kb_id=effective_kb_id,
-                history=conversation_history,
+        # Generate initial AI response
+        ai_response, tools_used, ai_result = await generate_ai_response(
+            enhanced_query, effective_user_id, effective_kb_id, relevant_docs,
+            conversation_id, conversation_history, org_context
+        )
+
+        # Check for initial handoff
+        handoff_triggered = detect_handoff_intent(ai_response, data.message, tools_used)
+
+        # If handoff detected and KB wasn't searched initially, search now and retry
+        if handoff_triggered and not should_search_kb:
+            logger.info("🔄 HANDOFF DETECTED - Searching KB before escalating")
+            context, sources, relevant_docs = await search_knowledge_base(data.message, effective_kb_id)
+
+            # Rebuild query with KB context
+            enhanced_query_with_kb = f"""{org_info}
+
+You are a customer support agent for {org_context['name']}.
+
+Knowledge Base Context:{context}
+
+User Message: {data.message}
+
+Respond professionally and helpfully as a support agent for {org_context['name']}."""
+
+            # Generate new response with KB context
+            ai_response, tools_used, ai_result = await generate_ai_response(
+                enhanced_query_with_kb, effective_user_id, effective_kb_id, relevant_docs,
+                conversation_id, conversation_history, org_context
             )
-            ai_response = ai_result.output
-            tools_used = getattr(ai_result, 'tools_used', []) or []
-            ai_time = time.time() - ai_start
-            logger.info(f"⏱️ AI PROCESSING TIME - {ai_time:.3f}s")
-        except Exception as ai_error:
-            ai_time = time.time() - ai_start
-            logger.error(f"❌ AI SERVICE FAILED - Error: {str(ai_error)}")
-            ai_response = f"I'm sorry, I'm currently experiencing technical difficulties. As a support agent for {org_context['name']}, please try again in a moment or contact our support team if the issue persists."
-            tools_used = []
+
+            # Check for handoff again
+            handoff_triggered = detect_handoff_intent(ai_response, data.message, tools_used)
+            should_search_kb = True  # Update for metrics
 
         response_time = time.time() - start_time
-
-        # Check for handoff
-        handoff_triggered = detect_handoff_intent(ai_response, data.message, tools_used)
 
         # Store messages
         supabase.table("messages").insert([
