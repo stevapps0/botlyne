@@ -69,7 +69,7 @@ router = APIRouter()
 # Pydantic models
 class QueryRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=settings.MAX_MESSAGE_LENGTH, description="User query message")
-    user_id: str = Field(..., min_length=1, max_length=settings.MAX_USER_ID_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$', description="User identifier")
+    user_id: Optional[str] = Field(None, min_length=1, max_length=settings.MAX_USER_ID_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$', description="User identifier")
     kb_id: Optional[str] = Field(None, min_length=1, max_length=settings.MAX_KB_ID_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$', description="Knowledge base ID")
     conversation_id: Optional[str] = Field(None, min_length=1, max_length=settings.MAX_CONVERSATION_ID_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$', description="Conversation ID")
 
@@ -487,6 +487,10 @@ async def query_knowledge_base(
     current_user: TokenData = Depends(get_current_user)
 ):
     """Query the knowledge base with AI agent"""
+    # Set user_id from auth if not provided
+    if not data.user_id:
+        data.user_id = current_user.user_id
+
     # KB selection: request kb_id takes priority, then API key kb_id
     kb_id = data.kb_id or current_user.kb_id
     if not kb_id:

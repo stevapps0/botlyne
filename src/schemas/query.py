@@ -5,7 +5,8 @@ from typing import List, Optional
 
 class QueryRequest(BaseModel):
     """Schema for query request."""
-    query: str
+    message: str
+    user_id: Optional[str] = None
     kb_id: Optional[str] = None  # Optional, will use API key's associated KB if not provided
     conversation_id: Optional[str] = None  # For continuing conversations
 

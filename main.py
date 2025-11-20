@@ -10,9 +10,11 @@ except ImportError:
     redis = None
     REDIS_AVAILABLE = False
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from datetime import datetime
 
@@ -84,6 +86,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Exception handler for validation errors
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Log validation errors with request details."""
+    try:
+        body = await request.body()
+        logger.error(f"Validation error on {request.url.path}: {exc.errors()}, body: {body.decode('utf-8', errors='ignore')}")
+    except Exception as log_error:
+        logger.error(f"Failed to log validation error: {log_error}, errors: {exc.errors()}")
+
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
 
 
 # Health check endpoint
