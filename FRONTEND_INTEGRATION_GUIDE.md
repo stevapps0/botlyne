@@ -924,6 +924,311 @@ const displayQRCode = (qrCodeData) => {
 };
 ```
 
+## Webapp Chat Integration
+
+### 1. Create Webapp Chat Integration
+
+**Request:**
+```bash
+curl -X POST "http://localhost:8000/api/v1/integrations" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "webchat",
+    "name": "Website Chat Widget",
+    "kb_id": "your_kb_id_here"
+  }'
+```
+
+**Success Response (200):**
+```json
+{
+  "success": true,
+  "message": "Webchat integration created successfully",
+  "data": {
+    "integration": {
+      "id": "integration-uuid",
+      "org_id": "org-uuid",
+      "type": "webchat",
+      "name": "Website Chat Widget",
+      "status": "active",
+      "kb_id": "kb-uuid",
+      "configs": [
+        {
+          "key": "chat_endpoint",
+          "value": "http://localhost:8000/chat/a1b2c3",
+          "is_secret": false
+        },
+        {
+          "key": "shortcode",
+          "value": "a1b2c3",
+          "is_secret": false
+        }
+      ],
+      "created_at": "2024-01-01T00:00:00.000000+00:00",
+      "updated_at": "2024-01-01T00:00:00.000000+00:00"
+    }
+  }
+}
+```
+
+### 2. Send Chat Message
+
+**Request:**
+```bash
+curl -X POST "http://localhost:8000/chat/a1b2c3" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "How do I reset my password?",
+    "session_id": null
+  }'
+```
+
+**Success Response (200):**
+```json
+{
+  "session_id": "session-uuid",
+  "message": {
+    "id": "msg-uuid",
+    "role": "assistant",
+    "content": "To reset your password, go to the login page and click 'Forgot Password'...",
+    "timestamp": "2024-01-01T00:00:00"
+  },
+  "sources": [
+    {
+      "title": "Password Reset Guide",
+      "filename": "password_guide.pdf",
+      "relevance_score": 0.92,
+      "excerpt": "Password reset instructions...",
+      "url": "http://localhost:8000/api/v1/files/file-123/view"
+    }
+  ],
+  "response_time": 1.45,
+  "handoff_triggered": false
+}
+```
+
+### 3. Stream Chat Response
+
+**Request:**
+```bash
+curl -X POST "http://localhost:8000/chat/a1b2c3/stream" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "What are your business hours?",
+    "session_id": null,
+    "stream": true
+  }'
+```
+
+**Streaming Response:**
+```
+data: {"chunk": "Our business", "finished": false}
+
+data: {"chunk": " hours are", "finished": false}
+
+data: {"chunk": " Monday through Friday", "finished": false}
+
+data: {"chunk": " 9 AM to 5 PM", "finished": false}
+
+data: {"chunk": "", "finished": true, "sources": [...], "response_time": 1.23}
+```
+
+### 4. Get Chat Session History
+
+**Request:**
+```bash
+curl -X GET "http://localhost:8000/chat/a1b2c3/session/session-uuid" \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+**Success Response (200):**
+```json
+{
+  "session_id": "session-uuid",
+  "messages": [
+    {
+      "id": "msg-1",
+      "role": "user",
+      "content": "How do I reset my password?",
+      "timestamp": "2024-01-01T00:00:00"
+    },
+    {
+      "id": "msg-2",
+      "role": "assistant",
+      "content": "To reset your password...",
+      "timestamp": "2024-01-01T00:00:01"
+    }
+  ],
+  "is_active": true,
+  "created_at": "2024-01-01T00:00:00",
+  "updated_at": "2024-01-01T00:00:01"
+}
+```
+
+### Frontend Webapp Chat Integration
+
+```javascript
+class ChatWidget {
+  constructor(apiKey, shortcode, containerId) {
+    this.apiKey = apiKey;
+    this.shortcode = shortcode;
+    this.container = document.getElementById(containerId);
+    this.sessionId = null;
+    this.init();
+  }
+
+  init() {
+    // Create chat UI
+    this.container.innerHTML = `
+      <div class="chat-widget">
+        <div class="chat-messages" id="messages"></div>
+        <div class="chat-input">
+          <input type="text" id="messageInput" placeholder="Type your message...">
+          <button id="sendButton">Send</button>
+        </div>
+      </div>
+    `;
+
+    // Bind events
+    document.getElementById('sendButton').onclick = () => this.sendMessage();
+    document.getElementById('messageInput').onkeypress = (e) => {
+      if (e.key === 'Enter') this.sendMessage();
+    };
+  }
+
+  async sendMessage() {
+    const input = document.getElementById('messageInput');
+    const message = input.value.trim();
+    if (!message) return;
+
+    // Add user message to UI
+    this.addMessage('user', message);
+    input.value = '';
+
+    try {
+      const response = await fetch(`/chat/${this.shortcode}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.apiKey}`
+        },
+        body: JSON.stringify({
+          message: message,
+          session_id: this.sessionId
+        })
+      });
+
+      const data = await response.json();
+      if (data.session_id) {
+        this.sessionId = data.session_id;
+      }
+
+      // Add AI response to UI
+      this.addMessage('assistant', data.message.content);
+
+      // Show sources if available
+      if (data.sources && data.sources.length > 0) {
+        this.showSources(data.sources);
+      }
+
+    } catch (error) {
+      console.error('Chat error:', error);
+      this.addMessage('assistant', 'Sorry, I encountered an error. Please try again.');
+    }
+  }
+
+  async sendStreamingMessage(message) {
+    // Add user message
+    this.addMessage('user', message);
+
+    try {
+      const response = await fetch(`/chat/${this.shortcode}/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.apiKey}`
+        },
+        body: JSON.stringify({
+          message: message,
+          session_id: this.sessionId,
+          stream: true
+        })
+      });
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let assistantMessage = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = JSON.parse(line.slice(6));
+            if (data.chunk) {
+              assistantMessage += data.chunk;
+              this.updateLastMessage('assistant', assistantMessage);
+            }
+            if (data.finished) {
+              if (data.sources) {
+                this.showSources(data.sources);
+              }
+              if (data.session_id) {
+                this.sessionId = data.session_id;
+              }
+              break;
+            }
+          }
+        }
+      }
+
+    } catch (error) {
+      console.error('Streaming error:', error);
+      this.addMessage('assistant', 'Sorry, I encountered an error.');
+    }
+  }
+
+  addMessage(role, content) {
+    const messages = document.getElementById('messages');
+    const messageDiv = document.createElement('div');
+    messageDiv.className = `message ${role}`;
+    messageDiv.textContent = content;
+    messages.appendChild(messageDiv);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  updateLastMessage(role, content) {
+    const messages = document.getElementById('messages');
+    const lastMessage = messages.lastElementChild;
+    if (lastMessage && lastMessage.classList.contains(role)) {
+      lastMessage.textContent = content;
+    } else {
+      this.addMessage(role, content);
+    }
+  }
+
+  showSources(sources) {
+    const sourcesDiv = document.createElement('div');
+    sourcesDiv.className = 'chat-sources';
+    sourcesDiv.innerHTML = '<h4>Related Documents:</h4>' +
+      sources.map(source =>
+        `<a href="${source.url}" target="_blank">${source.title}</a> (${Math.round(source.relevance_score * 100)}% relevant)`
+      ).join('<br>');
+    document.getElementById('messages').appendChild(sourcesDiv);
+  }
+}
+
+// Initialize chat widget
+const chat = new ChatWidget('your-api-key', 'a1b2c3', 'chat-container');
+```
+
 ## Error Handling
 
 All API endpoints return appropriate HTTP status codes:

@@ -125,6 +125,34 @@ async def create_integration(
                 supabase.table("integrations").update({"status": "error"}).eq("id", integration_id).execute()
                 raise HTTPException(status_code=500, detail=f"Failed to setup WhatsApp: {str(e)}")
 
+        elif data.type == "webchat":
+            try:
+                # Get organization shortcode
+                org_result = supabase.table("organizations").select("shortcode").eq("id", current_user.org_id).single().execute()
+                if not org_result.data:
+                    raise HTTPException(status_code=400, detail="Organization shortcode not found")
+
+                shortcode = org_result.data["shortcode"]
+                chat_endpoint = f"{settings.API_BASE_URL}/api/v1/chat/{shortcode}"
+
+                # Store configs
+                configs = {
+                    "chat_endpoint": chat_endpoint,
+                    "shortcode": shortcode
+                }
+                set_integration_configs(integration_id, configs)
+
+                # Update status to active
+                supabase.table("integrations").update({"status": "active"}).eq("id", integration_id).execute()
+
+                logger.info(f"Webchat integration {integration_id} created successfully")
+
+            except Exception as e:
+                logger.error(f"Failed to setup webchat integration: {str(e)}")
+                # Update status to error
+                supabase.table("integrations").update({"status": "error"}).eq("id", integration_id).execute()
+                raise HTTPException(status_code=500, detail=f"Failed to setup webchat: {str(e)}")
+
         # Get configs for response
         configs = get_integration_configs(integration_id)
         config_objects = [
@@ -137,7 +165,7 @@ async def create_integration(
             org_id=current_user.org_id,
             type=data.type,
             name=data.name,
-            status="active" if data.type == "whatsapp" else "pending",
+            status="active" if data.type in ["whatsapp", "webchat"] else "pending",
             kb_id=data.kb_id,
             configs=config_objects,
             created_at=datetime.fromisoformat(integration["created_at"]),

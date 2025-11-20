@@ -18,7 +18,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from datetime import datetime
 
-from src.api.v1 import auth, kb, query, upload, apikeys, integrations
+from src.api.v1 import auth, kb, query, upload, apikeys, integrations, chat
 from src.core.database import supabase
 from src.core.auth import get_current_user, require_admin, security
 from src.core.config import settings
@@ -167,6 +167,7 @@ app.include_router(upload.router, prefix="/api/v1", tags=["Uploads"])
 app.include_router(query.router, prefix="/api/v1", tags=["Querying"])
 app.include_router(apikeys.router, prefix="/api/v1", tags=["API Keys"])
 app.include_router(integrations.router, prefix="/api/v1", tags=["Integrations"])
+app.include_router(chat.router, prefix="", tags=["Chat"])  # Chat endpoints at root level
 
 
 if __name__ == "__main__":
