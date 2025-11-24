@@ -1,14 +1,14 @@
 """Integrations API endpoints for external services like WhatsApp."""
 from fastapi import APIRouter, HTTPException, status, Depends, Header
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Annotated
 import logging
 import secrets
-import uuid
+import time
 from datetime import datetime
 
 from src.core.database import supabase
-from src.core.auth import get_current_user
+from src.core.auth import get_current_user, require_admin
 from src.core.auth_utils import TokenData
 from src.core.config import settings
 from src.services.evolution_api import evolution_api_client
@@ -79,8 +79,27 @@ async def create_integration(
         org_result = supabase.table("organizations").select("shortcode").eq("id", current_user.org_id).single().execute()
         org_shortcode = org_result.data["shortcode"] if org_result.data else current_user.org_id[:8]
 
-        # Generate instance name using org shortcode (consistent for org)
-        instance_name = f"{org_shortcode}_{data.type}"
+        # Check for existing integrations BEFORE creating to prevent duplicates
+        existing_check = supabase.table("integrations").select("id", "status").eq("org_id", current_user.org_id).eq("type", data.type).execute()
+
+        if existing_check.data:
+            existing_active = [i for i in existing_check.data if i["status"] == "active"]
+            if existing_active:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Organization already has an active {data.type} integration"
+                )
+
+            # Allow creation but log warning about existing failed integrations
+            existing_failed = [i for i in existing_check.data if i["status"] in ["error", "pending"]]
+            if existing_failed:
+                logger.warning(f"Organization {current_user.org_id} has {len(existing_failed)} failed/pending {data.type} integrations. Creating new one.")
+
+        # Generate unique instance name using org shortcode + timestamp + random for uniqueness
+        import uuid
+        timestamp = str(int(time.time()))
+        random_suffix = str(uuid.uuid4())[:8]
+        instance_name = f"{org_shortcode}_whatsapp_{timestamp}_{random_suffix}"
 
         # Create integration record
         integration_data = {
@@ -98,12 +117,19 @@ async def create_integration(
         # Handle type-specific setup
         if data.type == "whatsapp":
             try:
-                # Check if org already has a WhatsApp integration
-                existing_integration = supabase.table("integrations").select("*").eq("org_id", current_user.org_id).eq("type", "whatsapp").eq("status", "active").execute()
+                # Check if org already has ANY WhatsApp integration (active, pending, or error)
+                existing_integrations = supabase.table("integrations").select("id", "status", "name").eq("org_id", current_user.org_id).eq("type", "whatsapp").execute()
 
-                if existing_integration.data and len(existing_integration.data) > 0:
-                    logger.warning(f"Organization {current_user.org_id} already has an active WhatsApp integration")
-                    raise HTTPException(status_code=400, detail="Organization already has an active WhatsApp integration. Delete the existing one first.")
+                if existing_integrations.data and len(existing_integrations.data) > 0:
+                    active_count = sum(1 for i in existing_integrations.data if i["status"] == "active")
+                    if active_count > 0:
+                        logger.warning(f"Organization {current_user.org_id} already has an active WhatsApp integration")
+                        raise HTTPException(status_code=400, detail="Organization already has an active WhatsApp integration. Delete the existing one first.")
+
+                    # Allow cleanup of failed integrations, but warn about multiple pending
+                    pending_count = sum(1 for i in existing_integrations.data if i["status"] == "pending")
+                    if pending_count > 0:
+                        logger.warning(f"Organization {current_user.org_id} has {pending_count} pending WhatsApp integrations. This may indicate previous failures.")
 
                 # Create Evolution API instance
                 evolution_result = await evolution_api_client.create_instance(instance_name)
@@ -352,6 +378,61 @@ async def delete_integration(
         )
 
 
+@router.post("/integrations/cleanup", response_model=APIResponse)
+async def cleanup_failed_integrations(
+    current_user: TokenData = Depends(require_admin)
+):
+    """Clean up failed/pending integrations older than 24 hours (admin only)."""
+    try:
+        from datetime import datetime, timedelta
+
+        # Find failed/pending integrations older than 24 hours
+        cutoff_time = datetime.utcnow() - timedelta(hours=24)
+
+        failed_integrations = supabase.table("integrations").select("id", "type", "status", "created_at") \
+            .eq("org_id", current_user.org_id) \
+            .in_("status", ["error", "pending"]) \
+            .lt("created_at", cutoff_time.isoformat()) \
+            .execute()
+
+        cleaned_count = 0
+        if failed_integrations.data:
+            for integration in failed_integrations.data:
+                try:
+                    # Cleanup external resources for WhatsApp integrations
+                    if integration["type"] == "whatsapp":
+                        configs = get_integration_configs(integration["id"])
+                        instance_name = configs.get("instance_name")
+                        if instance_name:
+                            try:
+                                await evolution_api_client.delete_instance(instance_name)
+                                logger.info(f"Cleaned up Evolution API instance: {instance_name}")
+                            except Exception as e:
+                                logger.warning(f"Failed to cleanup Evolution API instance {instance_name}: {str(e)}")
+
+                    # Delete the integration
+                    supabase.table("integrations").delete().eq("id", integration["id"]).execute()
+                    cleaned_count += 1
+                    logger.info(f"Cleaned up failed integration: {integration['id']}")
+
+                except Exception as e:
+                    logger.error(f"Failed to cleanup integration {integration['id']}: {str(e)}")
+
+        return APIResponse(
+            success=True,
+            message=f"Cleaned up {cleaned_count} failed integrations",
+            data={"cleaned_count": cleaned_count}
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to cleanup integrations: {str(e)}")
+        return APIResponse(
+            success=False,
+            message="Failed to cleanup integrations",
+            error=str(e)
+        )
+
+
 @router.get("/integrations/{integration_id}/qr", response_model=APIResponse)
 async def get_qr_code(
     integration_id: str,
@@ -407,46 +488,93 @@ async def get_qr_code(
 
 
 @router.post("/integrations/webhook/{integration_id}")
+@router.post("/integrations/webhook/{integration_id}/{event_type:path}")
 async def handle_webhook(
     integration_id: str,
-    payload: WhatsAppWebhookPayload
-):
+    payload: WhatsAppWebhookPayload,
+    event_type: str = "messages-upsert"  # Default for Evolution API
+) -> dict[str, str]:
     """Handle incoming webhooks from external services."""
+    logger.info(f"Received webhook for integration {integration_id}, event: {event_type}")
+
     try:
-        logger.info(f"Received webhook for integration {integration_id}")
-
-        # Get integration details
-        result = supabase.table("integrations").select("*").eq("id", integration_id).single().execute()
-        if not result.data:
+        # Get integration details with error handling
+        integration_result = supabase.table("integrations").select("*").eq("id", integration_id).single().execute()
+        if not integration_result.data:
             logger.warning(f"Integration {integration_id} not found")
-            raise HTTPException(status_code=404, detail="Integration not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Integration not found")
 
-        integration = result.data
+        integration = integration_result.data
 
-        # Log the event
-        supabase.table("integration_events").insert({
+        # Log the event with modern Pydantic serialization
+        event_data = {
             "integration_id": integration_id,
-            "event_type": "webhook_received",
-            "payload": payload.dict(),
-            "status": "processing"
-        }).execute()
+            "event_type": f"webhook_{event_type}",
+            "payload": payload.model_dump(),
+            "status": "pending"  # Changed from "processing" to "pending"
+        }
 
-        # Handle WhatsApp messages
-        if integration["type"] == "whatsapp" and payload.message:
-            await handle_whatsapp_message(integration, payload)
+        supabase.table("integration_events").insert(event_data).execute()
 
-        # Update event status
-        supabase.table("integration_events").update({"status": "processed"}).eq("integration_id", integration_id).eq("event_type", "webhook_received").order("created_at", desc=True).limit(1).execute()
+        # Handle different integration types and event types
+        match integration["type"]:
+            case "whatsapp":
+                # Extract event type from payload.event if available
+                actual_event_type = getattr(payload, 'event', event_type) if hasattr(payload, 'event') else event_type
+                await _handle_whatsapp_event(integration, actual_event_type, payload, integration_id)
+            case _:
+                logger.warning(f"Unsupported integration type: {integration['type']} for webhook")
+
+        # Update event status to processed
+        supabase.table("integration_events") \
+            .update({"status": "processed"}) \
+            .eq("integration_id", integration_id) \
+            .eq("event_type", f"webhook_{event_type}") \
+            .eq("status", "pending") \
+            .execute()
 
         return {"status": "ok"}
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Webhook processing failed: {str(e)}")
-        # Update event status to failed
-        supabase.table("integration_events").update({"status": "failed"}).eq("integration_id", integration_id).eq("event_type", "webhook_received").order("created_at", desc=True).limit(1).execute()
-        raise HTTPException(status_code=500, detail="Webhook processing failed")
+        logger.error(f"Webhook processing failed: {e}", exc_info=True)
+
+        # Update event status to failed (with error handling)
+        try:
+            supabase.table("integration_events") \
+                .update({"status": "failed"}) \
+                .eq("integration_id", integration_id) \
+                .eq("event_type", f"webhook_{event_type}") \
+                .eq("status", "pending") \
+                .execute()
+        except Exception as db_error:
+            logger.error(f"Failed to update event status: {db_error}")
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Webhook processing failed"
+        )
+
+
+async def _handle_whatsapp_event(
+    integration: dict[str, Any],
+    event_type: str,
+    payload: WhatsAppWebhookPayload,
+    integration_id: str
+) -> None:
+    """Handle WhatsApp-specific webhook events."""
+    match event_type:
+        case "messages-upsert" | "messages-update" if payload.message:
+            await handle_whatsapp_message(integration, payload)
+            logger.info(f"Successfully processed WhatsApp {event_type} for integration {integration_id}")
+        case "connection.update":
+            # Handle connection status updates
+            data = getattr(payload, 'data', {})
+            state = data.get('state', 'unknown') if isinstance(data, dict) else 'unknown'
+            logger.info(f"WhatsApp connection update for integration {integration_id}: {state}")
+        case _:
+            logger.info(f"Unhandled WhatsApp event type: {event_type} for integration {integration_id}")
 
 
 async def handle_whatsapp_message(integration: Dict[str, Any], payload: WhatsAppWebhookPayload):

@@ -2,9 +2,9 @@
 import hashlib
 import hmac
 import time
-import json
 import ipaddress
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any, Union
+from dataclasses import dataclass, field
 from fastapi import Request, HTTPException, status, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 import logging
@@ -13,14 +13,10 @@ from datetime import datetime, timedelta
 try:
     import redis.asyncio as redis
     REDIS_AVAILABLE = True
-except ImportError:
-    redis = None
-    REDIS_AVAILABLE = False
-
-# Type alias for Redis client
-RedisClient = None
-if REDIS_AVAILABLE:
     RedisClient = redis.Redis
+except ImportError:
+    REDIS_AVAILABLE = False
+    RedisClient = None
 
 from src.core.config import settings
 from src.core.database import supabase
@@ -28,15 +24,31 @@ from src.core.database import supabase
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class WebhookSecurityConfig:
+    """Configuration for webhook security settings."""
+    default_rate_limit: int = 60  # requests per minute
+    rate_limit_window: int = 60   # seconds
+    timestamp_tolerance: int = 300  # 5 minutes
+    redis_url: Optional[str] = field(default_factory=lambda: getattr(settings, 'REDIS_URL', None))
+    default_allowed_ips: list[str] = field(default_factory=list)
+
+
 class WebhookSecurityMiddleware(BaseHTTPMiddleware):
     """Middleware for webhook security including signature validation, rate limiting, and IP filtering."""
-    
-    def __init__(self, app, redis_client: Optional[RedisClient] = None):
+
+    def __init__(
+        self,
+        app,
+        redis_client: Optional[RedisClient] = None,
+        config: Optional[WebhookSecurityConfig] = None
+    ) -> None:
         super().__init__(app)
         self.redis_client = redis_client
-        self.rate_limit_cache = {}  # Fallback if Redis not available
+        self.config = config or WebhookSecurityConfig()
+        self.rate_limit_cache: dict[str, int] = {}  # Fallback if Redis not available
         
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(self, request: Request, call_next) -> Union[Response, Any]:
         """Process request through webhook security middleware."""
         # Only apply to webhook endpoints
         if not request.url.path.startswith("/api/v1/integrations/webhook/"):
@@ -45,16 +57,27 @@ class WebhookSecurityMiddleware(BaseHTTPMiddleware):
         start_time = time.time()
         
         try:
-            # Extract integration ID from path
+            # Extract integration ID from path - find the UUID in the path
             path_parts = request.url.path.split("/")
-            if len(path_parts) < 5:
-                logger.warning(f"Invalid webhook path: {request.url.path}")
+            integration_id = None
+            for part in path_parts:
+                # UUID pattern: 8-4-4-4-12 hex digits
+                if len(part) == 36 and part.count('-') == 4:
+                    try:
+                        # Validate it's a proper UUID
+                        import uuid
+                        uuid.UUID(part)
+                        integration_id = part
+                        break
+                    except ValueError:
+                        continue
+
+            if not integration_id:
+                logger.warning(f"Could not extract integration ID from path: {request.url.path}")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Invalid webhook endpoint"
                 )
-            
-            integration_id = path_parts[-1]
             
             # Get client IP
             client_ip = self._get_client_ip(request)
@@ -90,7 +113,7 @@ class WebhookSecurityMiddleware(BaseHTTPMiddleware):
             )
     
     def _get_client_ip(self, request: Request) -> str:
-        """Extract client IP from request headers."""
+        """Extract client IP from request headers with modern pattern matching."""
         # Check for forwarded headers first
         forwarded_for = request.headers.get("x-forwarded-for")
         if forwarded_for:
@@ -106,7 +129,7 @@ class WebhookSecurityMiddleware(BaseHTTPMiddleware):
         
         return "unknown"
     
-    async def _extract_request_data(self, request: Request) -> tuple:
+    async def _extract_request_data(self, request: Request) -> tuple[Optional[str], bytes, Optional[str]]:
         """Extract timestamp, body, and signature from request."""
         body = await request.body()
         timestamp = request.headers.get("x-timestamp")
@@ -114,25 +137,28 @@ class WebhookSecurityMiddleware(BaseHTTPMiddleware):
         
         return timestamp, body, signature
     
-    async def _validate_integration(self, integration_id: str):
+    async def _validate_integration(self, integration_id: str) -> None:
         """Validate that the integration exists and is active."""
         try:
-            result = supabase.table("integrations").select("id", "status", "org_id").eq("id", integration_id).single().execute()
-            
+            result = supabase.table("integrations").select("id", "status", "org_id").eq("id", integration_id).execute()
+
             if not result.data:
                 logger.warning(f"Webhook received for non-existent integration: {integration_id}")
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Integration not found"
                 )
-            
-            if result.data["status"] != "active":
-                logger.warning(f"Webhook received for inactive integration: {integration_id}")
+
+            integration = result.data[0]
+            if integration["status"] != "active":
+                logger.warning(f"Webhook received for inactive integration: {integration_id} (status: {integration['status']})")
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Integration is not active"
                 )
-                
+
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Integration validation failed: {str(e)}")
             raise HTTPException(
@@ -140,7 +166,7 @@ class WebhookSecurityMiddleware(BaseHTTPMiddleware):
                 detail="Integration validation failed"
             )
     
-    async def _validate_ip_whitelist(self, integration_id: str, client_ip: str):
+    async def _validate_ip_whitelist(self, integration_id: str, client_ip: str) -> None:
         """Validate client IP against whitelist for the integration."""
         try:
             # Get integration configs
@@ -148,8 +174,8 @@ class WebhookSecurityMiddleware(BaseHTTPMiddleware):
             
             if not result.data:
                 return  # No IP whitelist configured, allow all IPs
-            
-            allowed_ips_str = result.data["value"]
+
+            allowed_ips_str = result.data.get("value")
             if not allowed_ips_str:
                 return
             
@@ -189,34 +215,25 @@ class WebhookSecurityMiddleware(BaseHTTPMiddleware):
             # Don't fail the request on whitelist validation errors
             return
     
-    async def _validate_signature(self, integration_id: str, timestamp: str, body: bytes, signature: str):
-        """Validate HMAC signature of the request."""
+    async def _validate_signature(self, integration_id: str, timestamp: Optional[str], body: bytes, signature: Optional[str]) -> None:
+        """Validate HMAC signature of the request (optional for Evolution API)."""
         try:
             # Get webhook secret from integration configs
             result = supabase.table("integration_configs").select("value").eq("integration_id", integration_id).eq("key", "webhook_secret").single().execute()
-            
-            if not result.data:
-                logger.warning(f"No webhook secret configured for integration {integration_id}")
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Webhook secret not configured"
-                )
-            
+
+            # If no webhook secret configured OR required headers missing, skip validation
+            if not result.data or not timestamp or not signature:
+                logger.info(f"Skipping signature validation for integration {integration_id} (no secret or missing headers)")
+                return
+
             webhook_secret = result.data["value"]
-            
+
             # Validate timestamp (prevent replay attacks)
-            if not timestamp:
-                logger.warning("Missing timestamp header")
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Missing timestamp"
-                )
-            
             try:
                 request_time = float(timestamp)
                 current_time = time.time()
                 time_diff = abs(current_time - request_time)
-                
+
                 # Allow 5 minute clock skew
                 if time_diff > 300:
                     logger.warning(f"Request timestamp too old: {timestamp}")
@@ -230,15 +247,7 @@ class WebhookSecurityMiddleware(BaseHTTPMiddleware):
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid timestamp format"
                 )
-            
-            # Validate signature
-            if not signature:
-                logger.warning("Missing signature header")
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Missing signature"
-                )
-            
+
             # Compute expected signature
             payload = f"{timestamp}.{body.decode('utf-8')}"
             expected_signature = hmac.new(
@@ -246,7 +255,7 @@ class WebhookSecurityMiddleware(BaseHTTPMiddleware):
                 payload.encode('utf-8'),
                 hashlib.sha256
             ).hexdigest()
-            
+
             # Use constant time comparison to prevent timing attacks
             if not hmac.compare_digest(signature, expected_signature):
                 logger.warning(f"Invalid signature for integration {integration_id}")
@@ -254,7 +263,7 @@ class WebhookSecurityMiddleware(BaseHTTPMiddleware):
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid signature"
                 )
-                
+
         except HTTPException:
             raise
         except Exception as e:
@@ -264,7 +273,7 @@ class WebhookSecurityMiddleware(BaseHTTPMiddleware):
                 detail="Signature validation failed"
             )
     
-    async def _validate_rate_limit(self, integration_id: str, client_ip: str):
+    async def _validate_rate_limit(self, integration_id: str, client_ip: str) -> None:
         """Validate rate limiting for the integration and IP."""
         try:
             # Rate limiting configuration
@@ -326,7 +335,7 @@ class WebhookSecurityMiddleware(BaseHTTPMiddleware):
             # Don't fail the request on rate limiting errors
             return
     
-    async def _log_webhook_access(self, integration_id: str, client_ip: str, endpoint: str):
+    async def _log_webhook_access(self, integration_id: str, client_ip: str, endpoint: str) -> None:
         """Log webhook access for monitoring."""
         try:
             log_entry = {
@@ -342,29 +351,11 @@ class WebhookSecurityMiddleware(BaseHTTPMiddleware):
                 "integration_id": integration_id,
                 "event_type": "webhook_access",
                 "payload": log_entry,
-                "status": "logged"
+                "status": "processed"
             }).execute()
             
         except Exception as e:
             logger.error(f"Failed to log webhook access: {str(e)}")
-
-
-class WebhookSecurityConfig:
-    """Configuration for webhook security settings."""
-    
-    def __init__(self):
-        # Rate limiting defaults
-        self.default_rate_limit = 60  # requests per minute
-        self.rate_limit_window = 60   # seconds
-        
-        # Signature validation
-        self.timestamp_tolerance = 300  # 5 minutes
-        
-        # Redis configuration for rate limiting
-        self.redis_url = settings.REDIS_URL if hasattr(settings, 'REDIS_URL') else None
-        
-        # IP whitelisting
-        self.default_allowed_ips = []  # Empty list means allow all IPs
 
 
 # Global security config instance
