@@ -495,7 +495,8 @@ async def handle_webhook(
     event_type: str = "messages-upsert"  # Default for Evolution API
 ) -> dict[str, str]:
     """Handle incoming webhooks from external services."""
-    logger.info(f"Received webhook for integration {integration_id}, event: {event_type}")
+    logger.info(f"📨 Received webhook for integration {integration_id}, event: {event_type}")
+    logger.info(f"📦 Full payload: {payload.model_dump()}")
 
     try:
         # Get integration details with error handling
@@ -521,6 +522,7 @@ async def handle_webhook(
             case "whatsapp":
                 # Extract event type from payload.event if available
                 actual_event_type = getattr(payload, 'event', event_type) if hasattr(payload, 'event') else event_type
+                logger.info(f"🔄 Processing WhatsApp event: {actual_event_type}")
                 await _handle_whatsapp_event(integration, actual_event_type, payload, integration_id)
             case _:
                 logger.warning(f"Unsupported integration type: {integration['type']} for webhook")
@@ -564,66 +566,132 @@ async def _handle_whatsapp_event(
     integration_id: str
 ) -> None:
     """Handle WhatsApp-specific webhook events."""
-    match event_type:
-        case "messages-upsert" | "messages-update" if payload.message:
-            await handle_whatsapp_message(integration, payload)
-            logger.info(f"Successfully processed WhatsApp {event_type} for integration {integration_id}")
-        case "connection.update":
+    # Normalize event type (Evolution API uses dots, we expect hyphens)
+    normalized_event = event_type.replace('.', '-')
+    logger.info(f"🔄 Normalized event type: {normalized_event} (from: {event_type})")
+
+    match normalized_event:
+        case "messages-upsert" | "messages-update":
+            # Check if there's message data in the payload (Evolution API puts it in data.message)
+            payload_dict = payload.model_dump()
+            data = payload_dict.get('data', {})
+            if data and data.get('message'):
+                await handle_whatsapp_message(integration, payload)
+                logger.info(f"Successfully processed WhatsApp message {normalized_event} for integration {integration_id}")
+            else:
+                logger.info(f"Received WhatsApp {normalized_event} event without message data for integration {integration_id}")
+        case "connection-update":
             # Handle connection status updates
-            data = getattr(payload, 'data', {})
+            payload_dict = payload.model_dump()
+            data = payload_dict.get('data', {})
             state = data.get('state', 'unknown') if isinstance(data, dict) else 'unknown'
             logger.info(f"WhatsApp connection update for integration {integration_id}: {state}")
         case _:
-            logger.info(f"Unhandled WhatsApp event type: {event_type} for integration {integration_id}")
+            logger.info(f"Unhandled WhatsApp event type: {normalized_event} (original: {event_type}) for integration {integration_id}")
 
 
 async def handle_whatsapp_message(integration: Dict[str, Any], payload: WhatsAppWebhookPayload):
     """Process incoming WhatsApp message."""
     try:
-        message = payload.message
-        if not message.get("body"):
-            return  # Not a text message
+        logger.info(f"Processing WhatsApp message. Full payload: {payload.model_dump()}")
 
-        sender_number = message.get("from", "").split("@")[0]  # Remove @s.whatsapp.net
-        message_text = message.get("body", "").strip()
-
-        if not sender_number or not message_text:
+        # Evolution API puts message data in payload.data, not payload.message
+        payload_dict = payload.model_dump()
+        data = payload_dict.get('data', {})
+        if not data:
+            logger.info("No data object in payload")
             return
 
-        logger.info(f"Processing WhatsApp message from {sender_number}: {message_text[:50]}...")
+        # Check if this is a message sent by the bot itself (fromMe: true)
+        key_info = data.get('key', {})
+        from_me = key_info.get('fromMe', False)
+        if from_me:
+            logger.info("Ignoring message sent by bot itself (fromMe: true)")
+            return
+
+        # Get the actual message content
+        message_data = data.get('message', {})
+        if not message_data:
+            logger.info("No message data in payload.data")
+            return
+
+        # Extract message text from conversation or extendedTextMessage
+        message_text = None
+        if 'conversation' in message_data:
+            message_text = message_data['conversation']
+        elif 'extendedTextMessage' in message_data:
+            message_text = message_data['extendedTextMessage'].get('text', '')
+
+        if not message_text:
+            logger.info(f"No text content found in message: {message_data}")
+            return
+
+        message_text = message_text.strip()
+        if not message_text:
+            logger.info("Message text is empty after stripping")
+            return
+
+        # Get sender number
+        sender_jid = key_info.get('remoteJid', '')
+        sender_number = sender_jid.split('@')[0] if '@' in sender_jid else sender_jid
+
+        if not sender_number:
+            logger.warning(f"Could not extract sender number from: {sender_jid}")
+            return
+
+        logger.info(f"✅ Processing WhatsApp message from {sender_number}: '{message_text}'")
 
         # Use sender number as user_id
         user_id = sender_number
 
         # Get KB ID (from integration or org default)
         kb_id = integration.get("kb_id")
+        logger.info(f"KB ID from integration: {kb_id}")
+
         if not kb_id:
             # Get org default KB
+            logger.info(f"Getting default KB for org {integration['org_id']}")
             org_result = supabase.table("knowledge_bases").select("id").eq("org_id", integration["org_id"]).limit(1).execute()
             if org_result.data:
                 kb_id = org_result.data[0]["id"]
+                logger.info(f"Found default KB: {kb_id}")
+            else:
+                logger.warning(f"No knowledge bases found for org {integration['org_id']}")
 
         if not kb_id:
-            logger.warning("No KB available for WhatsApp integration")
+            logger.error("No KB available for WhatsApp integration - cannot process message")
             return
+
+        logger.info(f"Using KB {kb_id} for message processing")
+
+        # For WhatsApp users, generate a UUID (database expects UUID format)
+        import uuid
+        whatsapp_user_id = str(uuid.uuid4())
 
         # Create query request
         query_request = QueryRequest(
             message=message_text,
-            user_id=user_id,
+            user_id=whatsapp_user_id,
             kb_id=kb_id
         )
 
+        logger.info(f"Processing query request: {query_request.model_dump()}")
+
         # Process query using extracted function
         response = await process_query_request(query_request, integration["org_id"], kb_id)
+        logger.info(f"Query response received: ai_response length = {len(response.ai_response) if response.ai_response else 0}")
 
         # Send response back via WhatsApp
         configs = get_integration_configs(integration["id"])
         instance_name = configs.get("instance_name")
+        logger.info(f"Evolution API instance name: {instance_name}")
 
         if instance_name and response.ai_response:
+            logger.info(f"Sending WhatsApp response to {sender_number}: '{response.ai_response[:100]}...'")
             await evolution_api_client.send_message(instance_name, sender_number, response.ai_response)
-            logger.info(f"Sent WhatsApp response to {sender_number}")
+            logger.info(f"✅ Successfully sent WhatsApp response to {sender_number}")
+        else:
+            logger.warning(f"Cannot send response - instance_name: {instance_name}, ai_response: {bool(response.ai_response)}")
 
         # Log successful message handling
         supabase.table("integration_events").insert({
@@ -634,7 +702,7 @@ async def handle_whatsapp_message(integration: Dict[str, Any], payload: WhatsApp
                 "message": message_text[:100],
                 "response": response.ai_response[:100] if response.ai_response else None
             },
-            "status": "completed"
+            "status": "processed"
         }).execute()
 
     except Exception as e:
