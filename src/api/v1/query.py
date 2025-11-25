@@ -72,6 +72,7 @@ class QueryRequest(BaseModel):
     user_id: Optional[str] = Field(None, min_length=1, max_length=settings.MAX_USER_ID_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$', description="User identifier")
     kb_id: Optional[str] = Field(None, min_length=1, max_length=settings.MAX_KB_ID_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$', description="Knowledge base ID")
     conversation_id: Optional[str] = Field(None, min_length=1, max_length=settings.MAX_CONVERSATION_ID_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$', description="Conversation ID")
+    metadata: Optional[dict] = Field(None, description="Additional metadata for conversation tracking")
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -324,7 +325,7 @@ async def get_org_context(org_id: str) -> dict:
     return {"name": "our organization", "description": "", "team_size": None}
 
 
-async def process_query_request(data: QueryRequest, org_id: str, kb_id: str = None) -> QueryResponse:
+async def process_query_request(data: QueryRequest, org_id: str, kb_id: str = None, metadata: Optional[dict] = None, channel_override: str = None) -> QueryResponse:
     """Process a query request - extracted for reuse in webhooks"""
     start_time = time.time()
 
@@ -370,15 +371,39 @@ async def process_query_request(data: QueryRequest, org_id: str, kb_id: str = No
                 # Reuse existing conversation
                 conversation_id = existing_conv.data[0]["id"]
                 logger.info(f"🔄 CONVERSATION REUSED - ID: {conversation_id}")
+
+                # Update channel if header override provided and different from current
+                if channel_override:
+                    conv_check = supabase.table("conversations").select("channel").eq("id", conversation_id).single().execute()
+                    current_channel = conv_check.data.get("channel") if conv_check.data else None
+
+                    if current_channel != channel_override:
+                        # Update channel only (no metadata column in schema)
+                        supabase.table("conversations").update({
+                            "channel": channel_override
+                        }).eq("id", conversation_id).execute()
+                        logger.info(f"📝 UPDATED CONVERSATION CHANNEL - ID: {conversation_id}, Channel: {channel_override}")
             else:
                 # Generate unique ticket number
                 ticket_number = ''.join(secrets.choice('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ') for _ in range(settings.MAX_TICKET_LENGTH))
                 logger.info(f"🆕 CREATING NEW CONVERSATION - Ticket: {ticket_number}")
-                conv_result = supabase.table("conversations").insert({
+
+                # Determine channel (header override takes precedence)
+                detected_channel = channel_override or "api"
+
+                # Prepare conversation data with metadata
+                conv_data = {
                     "user_id": effective_user_id,
                     "kb_id": effective_kb_id,
-                    "ticket_number": ticket_number
-                }).execute()
+                    "ticket_number": ticket_number,
+                    "channel": detected_channel
+                }
+
+                # Note: No metadata column in conversations table per schema
+                # Channel is stored in dedicated channel column
+                logger.info(f"📝 CONVERSATION CHANNEL - {detected_channel}")
+
+                conv_result = supabase.table("conversations").insert(conv_data).execute()
                 conversation_id = conv_result.data[0]["id"]
                 logger.info(f"✅ CONVERSATION CREATED - ID: {conversation_id}")
         else:
@@ -539,7 +564,8 @@ Respond professionally and helpfully as a support agent for {org_context['name']
 @router.post("/query", response_model=QueryResponse)
 async def query_knowledge_base(
     data: QueryRequest,
-    current_user: TokenData = Depends(get_current_user)
+    current_user: TokenData = Depends(get_current_user),
+    x_channel: str = Header(None, alias="X-Channel")
 ):
     """Query the knowledge base with AI agent"""
     # Set user_id from auth if not provided
@@ -556,8 +582,13 @@ async def query_knowledge_base(
     if not kb_check.data or kb_check.data["org_id"] != current_user.org_id:
         raise HTTPException(status_code=403, detail="Access denied to specified knowledge base")
 
-    # Use the extracted function
-    return await process_query_request(data, current_user.org_id, kb_id)
+    # Validate channel header
+    valid_channels = ['whatsapp', 'webchat', 'api', 'email', 'sandbox']
+    if x_channel and x_channel not in valid_channels:
+        raise HTTPException(status_code=400, detail=f"Invalid X-Channel header. Must be one of: {', '.join(valid_channels)}")
+
+    # Use the extracted function with channel override
+    return await process_query_request(data, current_user.org_id, kb_id, channel_override=x_channel)
 
 @router.get("/conversations", response_model=List[ConversationResponse])
 async def list_conversations(

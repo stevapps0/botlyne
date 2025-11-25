@@ -36,11 +36,7 @@ class ChatService:
             "kb_id": kb_id,
             "ticket_number": f"CHAT-{str(uuid.uuid4())[:8].upper()}",
             "status": "ongoing",
-            "metadata": {
-                "session_type": "webchat",
-                "integration_id": integration_id,
-                "org_id": org_id
-            }
+            "channel": "webchat"
         }).execute()
 
         session.id = result.data[0]["id"]

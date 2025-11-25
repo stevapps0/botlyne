@@ -677,8 +677,8 @@ async def handle_whatsapp_message(integration: Dict[str, Any], payload: WhatsApp
 
         logger.info(f"Processing query request: {query_request.model_dump()}")
 
-        # Process query using extracted function
-        response = await process_query_request(query_request, integration["org_id"], kb_id)
+        # Process query using extracted function with channel override
+        response = await process_query_request(query_request, integration["org_id"], kb_id, channel_override="whatsapp")
         logger.info(f"Query response received: ai_response length = {len(response.ai_response) if response.ai_response else 0}")
 
         # Send response back via WhatsApp
