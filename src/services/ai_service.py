@@ -87,11 +87,7 @@ class AIService:
                 # Create new conversation
                 conv_id = await ConversationCRUD.create_conversation(user_id, kb_id)
 
-            # Store user message if we have a conversation
-            if conv_id:
-                await MessageCRUD.create_message(conv_id, "user", prompt)
-
-            # Execute agent query
+            # Execute agent query (message storage is handled by the calling endpoint)
             response = await run_agent(
                 prompt=prompt,
                 user_id=user_id,
@@ -103,10 +99,8 @@ class AIService:
                 channel=channel,
             )
 
-            # Store AI response if we have a conversation
+            # Handle escalation and metrics if we have a conversation
             if conv_id:
-                await MessageCRUD.create_message(conv_id, "ai", response.output)
-
                 # Handle escalation if needed
                 if response.should_escalate:
                     await ConversationCRUD.update_escalation_status(
