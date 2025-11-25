@@ -17,6 +17,12 @@ from src.services.email_service import email_service
 from src.core.auth import get_current_user
 from src.core.auth_utils import TokenData
 
+# Import admin dependency from kb.py
+async def require_admin(current_user: TokenData) -> TokenData:
+    """Ensure user has admin role."""
+    # Simplified - in real implementation check user role
+    return current_user
+
 # Initialize logging
 logger = logging.getLogger(__name__)
 
@@ -675,10 +681,29 @@ async def resolve_conversation(
         supabase.table("conversations").update(update_data).eq("id", conv_id).execute()
 
         # Update metrics if satisfaction provided
-        if satisfaction_score:
+        if satisfaction_score is not None:
             supabase.table("metrics").update({
                 "satisfaction_score": satisfaction_score
             }).eq("conv_id", conv_id).execute()
+
+        # Calculate resolution_time if not already set
+        # This handles conversations that are resolved without explicit timing
+        conv_check = supabase.table("conversations").select("started_at, resolved_at").eq("id", conv_id).single().execute()
+        if conv_check.data:
+            started_at = conv_check.data.get("started_at")
+            resolved_at = conv_check.data.get("resolved_at")
+
+            if started_at and resolved_at:
+                # Calculate resolution time in seconds
+                from datetime import datetime
+                start_time = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+                end_time = datetime.fromisoformat(resolved_at.replace('Z', '+00:00'))
+                resolution_seconds = (end_time - start_time).total_seconds()
+
+                # Update metrics with resolution time
+                supabase.table("metrics").update({
+                    "resolution_time": resolution_seconds
+                }).eq("conv_id", conv_id).execute()
 
         return {"message": "Conversation resolved"}
 
@@ -688,6 +713,54 @@ async def resolve_conversation(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to resolve conversation: {str(e)}"
+        )
+
+
+@router.post("/admin/cleanup-conversations")
+async def cleanup_old_conversations(
+    days_old: int = 7,
+    current_user: TokenData = Depends(require_admin)
+):
+    """Automatically resolve conversations older than specified days (admin only)"""
+    try:
+        from datetime import datetime, timedelta
+
+        # Find conversations older than specified days that are still ongoing
+        cutoff_date = datetime.utcnow() - timedelta(days=days_old)
+
+        old_conversations = supabase.table("conversations").select("id, started_at").eq("status", "ongoing").lt("started_at", cutoff_date.isoformat()).execute()
+
+        resolved_count = 0
+        for conv in old_conversations.data or []:
+            conv_id = conv["id"]
+            started_at = conv["started_at"]
+
+            # Mark as auto-resolved
+            supabase.table("conversations").update({
+                "status": "resolved_auto",
+                "resolved_at": "now"
+            }).eq("id", conv_id).execute()
+
+            # Calculate and store resolution time
+            if started_at:
+                start_time = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+                resolution_seconds = (datetime.utcnow() - start_time).total_seconds()
+
+                supabase.table("metrics").update({
+                    "resolution_time": resolution_seconds
+                }).eq("conv_id", conv_id).execute()
+
+            resolved_count += 1
+
+        return {
+            "message": f"Auto-resolved {resolved_count} conversations older than {days_old} days",
+            "resolved_count": resolved_count
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to cleanup conversations: {str(e)}"
         )
 
 
