@@ -112,6 +112,51 @@ Review the provided AI response and return a structured assessment. If the respo
 Always prioritize customer safety and satisfaction.""",
 )
 
+# Topic generation agent for creating professional conversation topics
+topic_agent = Agent[AgentDeps, str](
+    model=model,
+    system_prompt="""You are a professional topic classifier for customer support conversations.
+
+Your role is to analyze customer support conversations and generate 1-3 professional, standardized topic categories that best describe the conversation.
+
+**Topic Guidelines:**
+- Use professional, business-appropriate language
+- Choose from these standard categories when possible:
+  * Account Management
+  * Billing & Payments
+  * Technical Support
+  * Product Information
+  * Feature Requests
+  * Bug Reports
+  * Integration Setup
+  * API Questions
+  * Documentation
+  * Training & Onboarding
+  * Security & Privacy
+  * Performance Issues
+  * General Inquiry
+  * Feedback & Suggestions
+
+- If none of the above fit perfectly, create a clear, professional category (max 3 words)
+- Focus on the core issue or main topic of discussion
+- Be consistent - use the same terminology for similar topics
+- Return only the topic names, one per line, no explanations
+
+**Examples:**
+Input: "How do I reset my password?"
+Output: Account Management
+
+Input: "The app keeps crashing when I try to upload files"
+Output: Bug Reports
+Technical Support
+
+Input: "Can you explain your pricing tiers?"
+Output: Billing & Payments
+Product Information
+
+Return only the topic names, nothing else.""",
+)
+
 # Define tools for the agent
 @agent.tool
 def get_current_time(ctx: RunContext[AgentDeps]) -> str:
@@ -457,6 +502,48 @@ async def main():
     print(f"Output: {result.output}")
     print(f"Reasoning: {result.reasoning}")
     print(f"Tools Used: {result.tools_used}")
+
+@retry_ai_request(max_attempts=settings.AI_MAX_RETRIES)
+async def generate_topic(
+    conversation_content: str,
+    user_id: str,
+    session_id: Optional[str] = None,
+    timezone: str = "UTC",
+) -> list[str]:
+    """
+    Generate professional topic categories for a conversation.
+
+    Args:
+        conversation_content: The conversation text to analyze
+        user_id: User identifier
+        session_id: Optional conversation session ID
+        timezone: User timezone
+
+    Returns:
+        List of professional topic categories
+    """
+    deps = AgentDeps(
+        user_id=user_id,
+        session_id=session_id,
+        timezone=timezone,
+        kb_id=None,
+        kb_context=None,
+    )
+
+    try:
+        result = await topic_agent.run(
+            f"Analyze this conversation and provide 1-3 professional topic categories:\n\n{conversation_content}",
+            deps=deps
+        )
+
+        # Parse the result into a list of topics
+        topics = [topic.strip() for topic in result.output.strip().split('\n') if topic.strip()]
+        return topics[:3]  # Limit to 3 topics max
+
+    except Exception as e:
+        logger.error(f"Topic generation failed for user {user_id}: {e}")
+        return ["General Inquiry"]  # Fallback topic
+
 
 # Run the example
 if __name__ == "__main__":

@@ -17,6 +17,9 @@ from src.services.email_service import email_service
 from src.core.auth import get_current_user
 from src.core.auth_utils import TokenData
 
+# Import for topic generation
+from src.services.ai import generate_topic
+
 # Import admin dependency from kb.py
 async def require_admin(current_user: TokenData) -> TokenData:
     """Ensure user has admin role."""
@@ -127,6 +130,33 @@ def detect_handoff_intent(response: str, query: str, tools_used: List[str] = Non
     # Only trigger if query explicitly requests escalation OR response clearly indicates limitation
     # Remove the "no tools used" check as it's causing false positives
     return query_escalation or response_limitation
+
+
+def detect_resolution_intent(message: str) -> bool:
+    """Detect if user message indicates conversation should be resolved"""
+    message_lower = message.lower().strip()
+
+    # Keywords indicating satisfaction and closure
+    resolution_keywords = [
+        "thank you", "thanks", "that's all", "all set", "perfect", "great",
+        "excellent", "wonderful", "awesome", "goodbye", "bye", "see you",
+        "that helps", "solved", "resolved", "fixed", "worked", "got it",
+        "understood", "clear", "appreciate", "helpful", "useful",
+        "that's what i needed", "exactly", "yes", "ok", "okay"
+    ]
+
+    # Check for explicit resolution phrases
+    explicit_resolution = any(phrase in message_lower for phrase in [
+        "that's all i wanted to know", "i'm good", "i'm all set",
+        "that answers my question", "problem solved", "issue resolved",
+        "everything is clear", "i understand now"
+    ])
+
+    # Check for multiple positive keywords (indicating satisfaction)
+    positive_count = sum(1 for keyword in resolution_keywords if keyword in message_lower)
+
+    # Resolve if explicit resolution OR multiple positive indicators
+    return explicit_resolution or positive_count >= 2
 
 
 def should_search_knowledge_base(message: str, org_context: dict) -> bool:
@@ -397,7 +427,7 @@ async def process_query_request(data: QueryRequest, org_id: str, kb_id: str = No
                 today = datetime.utcnow().strftime('%y%m%d')  # YYMMDD format
 
                 # Get next sequential number for today (2 digits to fit 6 char limit)
-                existing_tickets = supabase.table("conversations").select("ticket_number").ilike(f"T{today}%", "ticket_number").execute()
+                existing_tickets = supabase.table("conversations").select("ticket_number").ilike("ticket_number", f"T{today}%").execute()
                 existing_numbers = []
                 if existing_tickets.data:
                     for ticket in existing_tickets.data:
@@ -546,6 +576,61 @@ Respond as a member of the {org_context['name']} support team."""
                 "content": ai_response
             }
         ]).execute()
+
+        # Check for auto-resolution based on user message
+        resolution_triggered = detect_resolution_intent(data.message)
+        if resolution_triggered:
+            logger.info("🤖 AUTO-RESOLUTION DETECTED - User seems satisfied, resolving conversation")
+            supabase.table("conversations").update({
+                "status": "resolved_ai",
+                "resolved_at": "now"
+            }).eq("id", conversation_id).execute()
+
+            # Calculate and store resolution time
+            conv_check = supabase.table("conversations").select("started_at").eq("id", conversation_id).single().execute()
+            if conv_check.data and conv_check.data.get("started_at"):
+                from datetime import datetime
+                start_time = datetime.fromisoformat(conv_check.data["started_at"].replace('Z', '+00:00'))
+                resolution_seconds = (datetime.utcnow() - start_time).total_seconds()
+
+                supabase.table("metrics").update({
+                    "resolution_time": resolution_seconds
+                }).eq("conv_id", conversation_id).execute()
+                logger.info(f"✅ Auto-resolved conversation {conversation_id}")
+
+        # Generate and store conversation topics
+        try:
+            # Get recent conversation messages for topic generation
+            messages_result = supabase.table("messages").select("sender", "content").eq("conv_id", conversation_id).order("timestamp").execute()
+            if messages_result.data:
+                # Build conversation content for topic analysis
+                conversation_text = ""
+                for msg in messages_result.data[-10:]:  # Last 10 messages for context
+                    sender = "Customer" if msg["sender"] == "user" else "AI"
+                    conversation_text += f"{sender}: {msg['content'][:200]}...\n"
+
+                # Generate topics using AI
+                topics = await generate_topic(
+                    conversation_content=conversation_text,
+                    user_id=effective_user_id,
+                    session_id=conversation_id,
+                    timezone="UTC"
+                )
+
+                # Store topics in database
+                for topic in topics:
+                    try:
+                        supabase.table("conversation_topics").insert({
+                            "conversation_id": conversation_id,
+                            "topic": topic,
+                            "created_at": "now"
+                        }).execute()
+                    except Exception as topic_error:
+                        logger.warning(f"Failed to store topic '{topic}' for conversation {conversation_id}: {topic_error}")
+
+                logger.info(f"📋 Generated and stored {len(topics)} topics for conversation {conversation_id}")
+        except Exception as topic_gen_error:
+            logger.warning(f"Topic generation failed for conversation {conversation_id}: {topic_gen_error}")
 
         # Update satisfaction score based on conversation intent
         try:
