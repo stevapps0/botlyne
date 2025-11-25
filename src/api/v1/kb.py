@@ -249,6 +249,18 @@ class MetricsResponse(BaseModel):
     total_ai_responses: int
     total_handoffs: int
 
+class TopicAnalytics(BaseModel):
+    topic: str
+    frequency: int
+    percentage: float
+    avg_satisfaction: float
+    total_conversations: int
+
+class TopicAnalyticsResponse(BaseModel):
+    top_topics: List[TopicAnalytics]
+    total_topics_analyzed: int
+    analysis_period_days: int
+
 @router.get("/orgs/{org_id}/metrics", response_model=MetricsResponse)
 async def get_organization_metrics(
     org_id: str,
@@ -344,4 +356,61 @@ async def get_organization_metrics(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to get metrics: {str(e)}"
+        )
+
+
+@router.get("/orgs/{org_id}/topics", response_model=TopicAnalyticsResponse)
+async def get_topic_analytics(
+    org_id: str,
+    days: int = 30,
+    limit: int = 20,
+    current_user: TokenData = Depends(get_current_user)
+):
+    """Get top conversation topics for an organization"""
+    try:
+        # Verify user belongs to org and is admin
+        if current_user.org_id != org_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+
+        user_role = supabase.table("users").select("role").eq("id", current_user.user_id).single().execute()
+        if user_role.data.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Admin access required")
+
+        # Get topic analytics from database function
+        result = supabase.rpc("get_topic_analytics", {
+            "org_id_param": org_id,
+            "days_param": days,
+            "limit_param": limit
+        }).execute()
+
+        if not result.data:
+            return TopicAnalyticsResponse(
+                top_topics=[],
+                total_topics_analyzed=0,
+                analysis_period_days=days
+            )
+
+        # Format the response
+        top_topics = []
+        for topic_data in result.data:
+            top_topics.append(TopicAnalytics(
+                topic=topic_data.get("topic", ""),
+                frequency=topic_data.get("frequency", 0),
+                percentage=round(topic_data.get("percentage", 0.0), 2),
+                avg_satisfaction=round(topic_data.get("avg_satisfaction", 0.0), 2),
+                total_conversations=topic_data.get("total_conversations", 0)
+            ))
+
+        return TopicAnalyticsResponse(
+            top_topics=top_topics,
+            total_topics_analyzed=len(top_topics),
+            analysis_period_days=days
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to get topic analytics: {str(e)}"
         )
