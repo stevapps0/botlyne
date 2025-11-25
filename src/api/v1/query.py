@@ -406,6 +406,18 @@ async def process_query_request(data: QueryRequest, org_id: str, kb_id: str = No
                 conv_result = supabase.table("conversations").insert(conv_data).execute()
                 conversation_id = conv_result.data[0]["id"]
                 logger.info(f"✅ CONVERSATION CREATED - ID: {conversation_id}")
+
+                # Initialize satisfaction score at 0.0 for new conversations (neutral/unknown)
+                try:
+                    supabase.table("metrics").insert({
+                        "conv_id": conversation_id,
+                        "satisfaction_score": 0.0,
+                        "ai_responses": 0,
+                        "handoff_triggered": False
+                    }).execute()
+                    logger.info(f"✅ Initialized satisfaction score at 0.0 for conversation {conversation_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize satisfaction score: {e}")
         else:
             logger.info(f"🔍 VERIFYING CONVERSATION - ID: {conversation_id}")
             # Verify conversation ownership
@@ -508,6 +520,28 @@ Respond professionally and helpfully as a support agent for {org_context['name']
                 "content": ai_response
             }
         ]).execute()
+
+        # Update satisfaction score based on conversation intent
+        try:
+            # Prepare conversation history for analysis (last 4 messages for context)
+            recent_history = []
+            for msg in conversation_history[-4:]:  # Last 4 messages for context
+                recent_history.append({
+                    "role": msg.get("role", msg.get("sender")),
+                    "content": msg.get("content", "")
+                })
+
+            # Call database function to update satisfaction score
+            supabase.rpc("update_conversation_satisfaction", {
+                "conv_id_param": conversation_id,
+                "new_message": data.message,
+                "conversation_history": recent_history
+            }).execute()
+
+            logger.info(f"✅ Updated satisfaction score for conversation {conversation_id}")
+        except Exception as e:
+            logger.warning(f"Failed to update satisfaction score: {e}")
+            # Don't fail the entire request if satisfaction scoring fails
 
         # Store metrics
         analytics = {
