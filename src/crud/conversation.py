@@ -64,7 +64,7 @@ class ConversationCRUD:
     async def update_escalation_status(
         conv_id: UUID,
         escalation_status: str,
-        customer_email: Optional[str] = None,
+        contact: Optional[str] = None,
         escalated_by: str = "ai",
         escalation_reason: Optional[str] = None
     ) -> bool:
@@ -75,8 +75,8 @@ class ConversationCRUD:
                 "escalated_at": datetime.utcnow().isoformat(),
                 "escalated_by": escalated_by
             }
-            if customer_email:
-                update_data["customer_email"] = customer_email
+            if contact:
+                update_data["contact"] = contact
             if escalation_reason:
                 update_data["escalation_reason"] = escalation_reason
 

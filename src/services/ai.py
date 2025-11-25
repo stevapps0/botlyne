@@ -6,6 +6,7 @@ import os
 import logging
 import pytz
 from datetime import datetime
+import supabase
 import sympy as sp
 
 from src.core.config import settings
@@ -26,15 +27,16 @@ model = GoogleModel('gemini-2.5-flash', provider=provider)
 # Create single agent with self-review capability
 agent = Agent[AgentDeps, AgentResponse](
     model=model,
-    system_prompt="""You are a knowledgeable customer support assistant for our organization with conversation memory.
+    system_prompt="""You are a member of the Stevapps Inc support team helping customers with conversation memory.
 
 Your primary role is to help customers by providing accurate, concise answers based on our knowledge base, organizational information, and conversation history. You should:
 
-1. **Be concise and direct** - Keep responses brief and to the point for faster lead generation. Avoid unnecessary words or explanations.
-2. **Be conversational and friendly** - Talk like a human support agent, not a robot
-3. **Use conversation history** - Reference previous messages in the conversation when relevant, especially for questions about "our last conversation" or follow-ups
+1. **Be concise and direct** - Keep responses brief and to the point. Avoid unnecessary pleasantries and get straight to the answer.
+2. **Use natural team language** - Mix "we" (our team) and "I" (as an individual team member) naturally in conversation.
+3. **Be straightforward** - Skip all politeness, greetings, and thank-yous. No "thanks", "please", or similar.
+4. **Use conversation history** - Reference previous messages in the conversation when relevant, especially for questions about "our last conversation" or follow-ups
 4. **Use the knowledge base** - Answer questions using the provided context and organizational documents
-5. **Be helpful and proactive** - Offer additional assistance and anticipate customer needs
+5. **Be efficient** - Provide information and ask for clarification when needed
 6. **Conservative escalation** - Only escalate to human support when you genuinely cannot help or the issue requires human expertise
 7. **Self-review your responses** - Before finalizing, review your own response for accuracy, safety, and completeness
 8. **Handle normal queries** - Answer basic questions about your services, capabilities, and general information without escalation
@@ -42,9 +44,10 @@ Your primary role is to help customers by providing accurate, concise answers ba
 **RESPONSE STYLE GUIDELINES:**
 - Keep responses under 100 words when possible
 - Get to the point quickly - answer the main question first
-- Use bullet points or numbered lists for multiple options
+- Use plain text only - no markdown, no bullet points, no formatting
 - Ask direct questions to gather needed information
 - End with clear next steps or calls-to-action
+- Never start with greetings, thanks, or pleasantries
 
 **IMPORTANT: Conversation Memory**
 You have access to the conversation history for this session. When customers ask about previous conversations, topics discussed, or follow up on earlier points, use the provided message history to give accurate, contextual responses. Do NOT say you don't remember past conversations - you have access to them through the conversation history.
@@ -67,11 +70,11 @@ After formulating your response, perform an internal self-review:
 
 1. **Can I answer this?** - Do I have enough information to help?
 2. **Is escalation needed?** - Does this require human expertise?
-3. **Escalation appropriateness** - Only if truly needed, ask for email politely
+3. **Escalation appropriateness** - Only if truly needed, ask for email directly without excessive politeness
 
 If your self-review finds issues, revise your response before sending.
 
-Always maintain a professional, helpful, and customer-focused tone. Reference specific information from our knowledge base when possible.""",
+Be direct and efficient. Reference specific information from our knowledge base when possible.""",
 )
 
 # Review agent for response validation and safety
@@ -154,6 +157,7 @@ async def run_agent(
     kb_id: Optional[str] = None,
     kb_context: Optional[str] = None,
     message_history: Optional[list] = None,
+    channel: str = "api",
 ) -> AgentResponse:
     """
     Run AI agent with typed dependencies and structured output.
@@ -206,12 +210,20 @@ async def run_agent(
         confidence=confidence,
         should_escalate=should_escalate,
         escalation_reason=escalation_reason if should_escalate else None,
-        needs_email=should_escalate,  # If escalating, we need email
+        needs_contact=should_escalate,  # If escalating, we need contact
     )
 
-    # If escalating, modify the response to be more customer-friendly
+    # If escalating, check if we already have contact info before asking
     if should_escalate:
-        initial_response.output += "\n\n" + generate_escalation_response()
+        # Check if user already has contact info stored
+        has_existing_contact = await check_existing_contact_info(user_id, session_id, channel)
+        if has_existing_contact:
+            # Use existing contact info for escalation
+            initial_response.output += "\n\n" + generate_escalation_response(channel=channel, has_contact=True)
+            initial_response.needs_contact = False  # Don't ask for contact if we already have it
+        else:
+            # Ask for contact info
+            initial_response.output += "\n\n" + generate_escalation_response(channel=channel)
 
     # Return the response directly - the agent has already self-reviewed
     # No separate review agent call needed
@@ -286,14 +298,63 @@ def detect_escalation_need(prompt: str, confidence: float, kb_context: Optional[
     return False, ""
 
 
-def generate_escalation_response(customer_email: Optional[str] = None) -> str:
+async def check_existing_contact_info(user_id: str, session_id: Optional[str], channel: str) -> bool:
     """
-    Generate a customer-friendly escalation response.
+    Check if we already have contact information for this user/conversation.
+
+    Args:
+        user_id: User identifier
+        session_id: Conversation session ID
+        channel: Communication channel
+
+    Returns:
+        True if contact info exists, False otherwise
     """
-    if customer_email:
-        return f"Thank you for providing your email. Our support team will reach out to you at {customer_email} within 2 hours to help resolve this issue. I've shared all the details from our conversation so they can assist you immediately."
+    try:
+        # For WhatsApp, we always have phone numbers
+        if channel == "whatsapp":
+            return True
+
+        # Check if conversation already has contact info
+        if session_id:
+            conv_result = supabase.table("conversations").select("contact").eq("id", session_id).single().execute()
+            if conv_result.data and conv_result.data.get("contact"):
+                return True
+
+        # Check conversation history for email mentions
+        if session_id:
+            messages_result = supabase.table("messages").select("content").eq("conv_id", session_id).order("timestamp", desc=True).limit(10).execute()
+            if messages_result.data:
+                for msg in messages_result.data:
+                    content = msg.get("content", "").lower()
+                    # Look for email patterns
+                    import re
+                    if re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', content):
+                        return True
+
+        return False
+    except Exception as e:
+        logger.error(f"Error checking existing contact info: {e}")
+        return False
+
+def generate_escalation_response(contact_info: Optional[str] = None, channel: str = "api", has_contact: bool = False) -> str:
+    """
+    Generate a customer-friendly escalation response based on channel and contact availability.
+
+    Args:
+        contact_info: Customer's contact info if available
+        channel: Communication channel (whatsapp, email, api, etc.)
+        has_contact: Whether we already have contact info
+    """
+    if has_contact or contact_info:
+        contact_display = contact_info or ("your phone" if channel == "whatsapp" else "your contact info")
+        return f"I'll connect you with our support team. They'll reach out to you at {contact_display} within 2 hours with all the conversation details."
     else:
-        return "I'd be happy to connect you with our support team so they can help resolve this for you. Could you please share your email address so they can follow up directly?"
+        # For WhatsApp, we already have phone numbers, so don't ask for email
+        if channel == "whatsapp":
+            return "I'll connect you with our support team. They'll reach out to you on WhatsApp within 2 hours with all the conversation details."
+        else:
+            return "I need to connect you with our support team. What's your email address so they can follow up directly?"
 
 
 @retry_ai_request(max_attempts=settings.AI_MAX_RETRIES)
@@ -371,8 +432,8 @@ Your assessment will be automatically structured with approval status, reviewed 
             confidence=initial_response.confidence,
             should_escalate=initial_response.should_escalate,
             escalation_reason=initial_response.escalation_reason,
-            needs_email=initial_response.needs_email,
-            customer_email=initial_response.customer_email
+            needs_contact=initial_response.needs_contact,
+            contact=initial_response.contact
         )
 
         logger.info(f"Response review completed: {review_notes}")

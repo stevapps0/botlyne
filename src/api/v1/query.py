@@ -286,7 +286,8 @@ async def generate_ai_response(
     relevant_docs: List[dict],
     conversation_id: str,
     conversation_history: List[dict],
-    org_context: dict
+    org_context: dict,
+    channel: str = "api"
 ) -> Tuple[str, List[str], Optional[Any]]:
     """Generate AI response and return response text, tools used, and ai_result object"""
     logger.info(f"🤖 AI PROCESSING START - Context length: {len(enhanced_query)}")
@@ -301,6 +302,7 @@ async def generate_ai_response(
             timezone="UTC",
             kb_id=kb_id,
             history=conversation_history,
+            channel=channel,
         )
         ai_response = ai_result.output
         tools_used = getattr(ai_result, 'tools_used', []) or []
@@ -390,8 +392,26 @@ async def process_query_request(data: QueryRequest, org_id: str, kb_id: str = No
                         }).eq("id", conversation_id).execute()
                         logger.info(f"📝 UPDATED CONVERSATION CHANNEL - ID: {conversation_id}, Channel: {channel_override}")
             else:
-                # Generate unique ticket number
-                ticket_number = ''.join(secrets.choice('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ') for _ in range(settings.MAX_TICKET_LENGTH))
+                # Generate compact ISO date-based ticket number (fits in 6 chars)
+                from datetime import datetime
+                today = datetime.utcnow().strftime('%y%m%d')  # YYMMDD format
+
+                # Get next sequential number for today (2 digits to fit 6 char limit)
+                existing_tickets = supabase.table("conversations").select("ticket_number").ilike(f"T{today}%", "ticket_number").execute()
+                existing_numbers = []
+                if existing_tickets.data:
+                    for ticket in existing_tickets.data:
+                        if ticket.get("ticket_number") and len(ticket["ticket_number"]) == 6:
+                            try:
+                                num_part = ticket["ticket_number"][5:]  # Last 2 chars
+                                existing_numbers.append(int(num_part))
+                            except (ValueError, IndexError):
+                                continue
+
+                next_number = max(existing_numbers) + 1 if existing_numbers else 1
+                if next_number > 99:  # Reset if we exceed 2 digits
+                    next_number = 1
+                ticket_number = f"T{today}{next_number:02d}"
                 logger.info(f"🆕 CREATING NEW CONVERSATION - Ticket: {ticket_number}")
 
                 # Determine channel (header override takes precedence)
@@ -468,18 +488,18 @@ async def process_query_request(data: QueryRequest, org_id: str, kb_id: str = No
 
         enhanced_query = f"""{org_info}
 
-You are a customer support agent for {org_context['name']}.
+You are a member of the {org_context['name']} support team.
 
 {"Knowledge Base Context:" + context if should_search_kb else context}
 
 User Message: {data.message}
 
-Respond professionally and helpfully as a support agent for {org_context['name']}."""
+Respond as a member of the {org_context['name']} support team."""
 
         # Generate initial AI response
         ai_response, tools_used, ai_result = await generate_ai_response(
             enhanced_query, effective_user_id, effective_kb_id, relevant_docs,
-            conversation_id, conversation_history, org_context
+            conversation_id, conversation_history, org_context, channel_override or "api"
         )
 
         # Check for initial handoff
@@ -493,18 +513,18 @@ Respond professionally and helpfully as a support agent for {org_context['name']
             # Rebuild query with KB context
             enhanced_query_with_kb = f"""{org_info}
 
-You are a customer support agent for {org_context['name']}.
+You are a member of the {org_context['name']} support team.
 
 Knowledge Base Context:{context}
 
 User Message: {data.message}
 
-Respond professionally and helpfully as a support agent for {org_context['name']}."""
+Respond as a member of the {org_context['name']} support team."""
 
             # Generate new response with KB context
             ai_response, tools_used, ai_result = await generate_ai_response(
                 enhanced_query_with_kb, effective_user_id, effective_kb_id, relevant_docs,
-                conversation_id, conversation_history, org_context
+                conversation_id, conversation_history, org_context, channel_override or "api"
             )
 
             # Check for handoff again

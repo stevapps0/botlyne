@@ -43,13 +43,13 @@ class AgentResponse(BaseModel):
         None,
         description="Reason for escalation if should_escalate is True"
     )
-    needs_email: bool = Field(
+    needs_contact: bool = Field(
         default=False,
-        description="Whether email collection is needed before escalation"
+        description="Whether contact collection is needed before escalation"
     )
-    customer_email: Optional[str] = Field(
+    contact: Optional[str] = Field(
         None,
-        description="Customer email collected for escalation"
+        description="Customer contact info collected for escalation"
     )
 
 

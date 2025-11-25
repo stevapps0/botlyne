@@ -46,6 +46,7 @@ class AIService:
         kb_id: Optional[str] = None,
         kb_context: Optional[str] = None,
         history: Optional[list] = None,
+        channel: str = "api",
     ) -> AgentResponse:
         """
         Execute AI agent query with error handling, logging, and database storage.
@@ -99,6 +100,7 @@ class AIService:
                 kb_id=kb_id,
                 kb_context=kb_context,
                 message_history=history,
+                channel=channel,
             )
 
             # Store AI response if we have a conversation
@@ -148,6 +150,7 @@ class AIService:
         timezone: str = "UTC",
         kb_id: Optional[str] = None,
         history: Optional[list] = None,
+        channel: str = "api",
     ) -> AgentResponse:
         """
         Execute agent query with RAG context from knowledge base.
@@ -203,54 +206,54 @@ class AIService:
             kb_id=kb_id,
             kb_context=context,
             history=history,
+            channel=channel,
         )
 
     @staticmethod
-    async def collect_customer_email(
+    async def collect_customer_contact(
         conv_id: str,
-        customer_email: str,
+        contact_info: str,
         user_id: str
     ) -> dict:
         """
-        Collect customer email and complete escalation process.
+        Collect customer contact info and complete escalation process.
 
         Args:
             conv_id: Conversation ID
-            customer_email: Customer's email address
+            contact_info: Customer's contact info (email, phone, etc.)
             user_id: User ID for validation
 
         Returns:
             dict: Status and confirmation message
         """
         try:
-            # Validate email format (basic check)
-            import re
-            if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', customer_email):
+            # Basic validation - accept various contact formats
+            if not contact_info or len(contact_info.strip()) < 3:
                 return {
                     "success": False,
-                    "message": "Please provide a valid email address."
+                    "message": "Please provide valid contact information."
                 }
 
-            # Update conversation with email and mark as escalated
+            # Update conversation with contact info and mark as escalated
             success = await ConversationCRUD.update_escalation_status(
                 conv_id=UUID(conv_id),
                 escalation_status="escalated",
-                customer_email=customer_email,
+                contact=contact_info,
                 escalated_by="ai"
             )
 
             if success:
-                # Send notification to support team (placeholder for now)
-                await AIService._notify_support_team(conv_id, customer_email)
+                # Send notification to support team
+                await AIService._notify_support_team(conv_id, contact_info)
 
                 return {
                     "success": True,
-                    "message": f"Thank you. Our support team will reach out to you at {customer_email} within 2 hours."
+                    "message": f"Your support team has been notified and will reach out to you at {contact_info} within 2 hours."
                 }
             else:
                 return {
                     "success": False,
-                    "message": "Sorry, there was an issue processing your email. Please try again."
+                    "message": "Sorry, there was an issue processing your contact information. Please try again."
                 }
 
         except Exception as e:
@@ -261,17 +264,17 @@ class AIService:
             }
 
     @staticmethod
-    async def _notify_support_team(conv_id: str, customer_email: str) -> None:
+    async def _notify_support_team(conv_id: str, contact_info: str) -> None:
         """
-        Notify support team about escalated conversation with customer email.
+        Notify support team about escalated conversation with customer contact info.
         """
         try:
-            logger.info(f"📧 Sending escalation notification for conversation {conv_id} with customer email: {customer_email}")
+            logger.info(f"📧 Sending escalation notification for conversation {conv_id} with customer contact: {contact_info}")
 
             # Get conversation details for the email
             conv_result = supabase.table("conversations").select("*").eq("id", conv_id).single().execute()
             if not conv_result.data:
-                logger.error(f"Conversation {conv_id} not found for escalation email")
+                logger.error(f"Conversation {conv_id} not found for escalation notification")
                 return
 
             conversation = conv_result.data
@@ -305,24 +308,26 @@ class AIService:
 
             # Create detailed email body
             email_body = f"""
-Handoff Notification - Customer Email Collected
+Handoff Notification - Customer Contact Collected
+
+This email has been sent to all users in your organization.
 
 Conversation ID: {conv_id}
 Ticket Number: {conversation.get('ticket_number', 'N/A')}
-Customer Email: {customer_email}
+Customer Contact: {contact_info}
 Status: Escalated
 Escalation Reason: {escalation_reason}
 
 Recent Conversation:
 {conversation_context}
 
-Please reach out to the customer at {customer_email} to resolve this issue.
+Please reach out to the customer at {contact_info} to resolve this issue.
 """
 
             # Send the notification email to all organization users
             success = await email_service.send_handoff_notification(
                 conv_id,
-                f"Escalated conversation - Customer email: {customer_email}",
+                f"Escalated conversation - Customer contact: {contact_info}",
                 email_body,
                 org_user_emails
             )
