@@ -617,16 +617,17 @@ Respond as a member of the {org_context['name']} support team."""
                     timezone="UTC"
                 )
 
-                # Store topics in database
+                # Store topics in database (skip duplicates silently)
                 for topic in topics:
                     try:
-                        supabase.table("conversation_topics").insert({
+                        # Use upsert to handle duplicates gracefully
+                        supabase.table("conversation_topics").upsert({
                             "conversation_id": conversation_id,
                             "topic": topic,
                             "created_at": "now"
-                        }).execute()
+                        }, on_conflict="conversation_id,topic").execute()
                     except Exception as topic_error:
-                        logger.warning(f"Failed to store topic '{topic}' for conversation {conversation_id}: {topic_error}")
+                        logger.debug(f"Topic '{topic}' already exists for conversation {conversation_id}")
 
                 logger.info(f"📋 Generated and stored {len(topics)} topics for conversation {conversation_id}")
         except Exception as topic_gen_error:
