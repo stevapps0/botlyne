@@ -49,6 +49,8 @@ A multi-tenant API that enables users to create accounts, organizations, and kno
 - **Performance Optimization**: Redis caching, async processing, connection pooling
 - **Circuit Breaker**: Graceful degradation and error recovery
 - **SLA Tracking**: Priority management and deadline monitoring
+- **Advanced Analytics**: Dynamic satisfaction scoring, topic analysis, channel tracking
+- **Multi-Channel Support**: WhatsApp, webchat, API, email with unified analytics
 
 ## Tech Stack
 
@@ -158,6 +160,8 @@ API available at `http://localhost:8000` with docs at `http://localhost:8000/doc
 - `POST /kb` - Create KB (JWT) → KBResponse
 - `GET /kb/{kb_id}` - Get KB details
 - `GET /orgs/{org_id}/kb` - List org KBs
+- `GET /orgs/{org_id}/metrics` - Organization analytics (Admin only)
+- `GET /orgs/{org_id}/topics` - Top conversation topics (Admin only)
 
 ### Organization Management
 
@@ -178,6 +182,7 @@ API available at `http://localhost:8000` with docs at `http://localhost:8000/doc
 - `POST /api/v1/query` - Advanced AI query with confidence scoring, source links, and optional KB override (JWT or API key)
 - `GET /api/v1/conversations` - List conversations
 - `POST /api/v1/conversations/{conv_id}/resolve` - Mark resolved
+- `POST /admin/cleanup-conversations` - Auto-resolve old conversations (Admin only)
 
 ### Integrations
 
@@ -352,6 +357,28 @@ curl -X GET "http://localhost:8000/api/v1/orgs/123e4567-e89b-12d3-a456-426614174
   -H "Authorization: Bearer YOUR_ADMIN_ACCESS_TOKEN"
 ```
 
+#### Get Top Conversation Topics (Admin Only)
+```bash
+curl -X GET "http://localhost:8000/api/v1/orgs/123e4567-e89b-12d3-a456-426614174000/topics?days=30&limit=10" \
+  -H "Authorization: Bearer YOUR_ADMIN_ACCESS_TOKEN"
+```
+
+#### Channel Tracking with X-Channel Header
+```bash
+# Track API calls by channel
+curl -X POST "http://localhost:8000/api/v1/query" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "X-Channel: whatsapp" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "How do I reset my password?"}'
+```
+
+#### Auto-Resolve Old Conversations (Admin Only)
+```bash
+curl -X POST "http://localhost:8000/admin/cleanup-conversations?days_old=30" \
+  -H "Authorization: Bearer YOUR_ADMIN_ACCESS_TOKEN"
+```
+
 ### Integrations
 
 #### Create WhatsApp Integration
@@ -478,9 +505,12 @@ MIT License - see LICENSE file for details.
 
 ## Roadmap
 
-### Phase 2 ✅
-- Advanced metrics dashboard
+### Phase 2 ✅ COMPLETED
+- **Advanced metrics dashboard** ✅ COMPLETED
 - **WhatsApp integration for AI chat** ✅ COMPLETED
+- **Dynamic satisfaction scoring** ✅ COMPLETED
+- **Topic analysis and insights** ✅ COMPLETED
+- **Multi-channel analytics** ✅ COMPLETED
 - Conversation memory and context
 - Multi-language support
 

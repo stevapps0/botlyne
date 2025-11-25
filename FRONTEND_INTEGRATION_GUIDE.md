@@ -2,7 +2,7 @@
 
 This guide shows how to integrate with the Knowledge Base AI API from a frontend application. Authentication is handled entirely client-side using Supabase Auth.
 
-**New Features**: The API now includes WhatsApp integration, human agent workflows, production security features, and monitoring capabilities.
+**New Features**: The API now includes WhatsApp integration, human agent workflows, production security features, comprehensive analytics, dynamic satisfaction scoring, topic analysis, and multi-channel support.
 
 ## Base URL
 ```
@@ -1227,6 +1227,245 @@ class ChatWidget {
 
 // Initialize chat widget
 const chat = new ChatWidget('your-api-key', 'a1b2c3', 'chat-container');
+```
+
+## Analytics & Metrics
+
+### 1. Organization Metrics (Admin Only)
+
+Get comprehensive analytics for your organization including satisfaction scores, resolution times, and channel performance.
+
+**Request:**
+```bash
+curl -X GET "http://localhost:8000/orgs/org-uuid/metrics" \
+  -H "Authorization: Bearer YOUR_ADMIN_JWT_TOKEN"
+```
+
+**Success Response (200):**
+```json
+{
+  "total_conversations": 1250,
+  "ai_resolution_rate": 78.5,
+  "average_response_time": 2.3,
+  "average_satisfaction_score": 3.8,
+  "total_resolution_time": 45.2,
+  "chats_handled": 1250,
+  "chat_deflection_rate": 78.5,
+  "escalation_rate": 21.5,
+  "total_ai_responses": 1250,
+  "total_handoffs": 267
+}
+```
+
+### 2. Top Conversation Topics (Admin Only)
+
+Analyze what customers are asking about most with intelligent topic categorization and satisfaction correlation.
+
+**Request:**
+```bash
+curl -X GET "http://localhost:8000/orgs/org-uuid/topics?days=30&limit=10" \
+  -H "Authorization: Bearer YOUR_ADMIN_JWT_TOKEN"
+```
+
+**Success Response (200):**
+```json
+{
+  "top_topics": [
+    {
+      "topic": "Account/Login Issues",
+      "frequency": 145,
+      "percentage": 23.5,
+      "avg_satisfaction": 2.1,
+      "total_conversations": 38
+    },
+    {
+      "topic": "Technical Issues",
+      "frequency": 98,
+      "percentage": 15.9,
+      "avg_satisfaction": 1.8,
+      "total_conversations": 28
+    },
+    {
+      "topic": "Billing/Payment",
+      "frequency": 87,
+      "percentage": 14.1,
+      "avg_satisfaction": 3.2,
+      "total_conversations": 24
+    }
+  ],
+  "total_topics_analyzed": 10,
+  "analysis_period_days": 30
+}
+```
+
+### 3. Channel Tracking
+
+Track conversations across different channels (WhatsApp, webchat, API, email, sandbox) using the X-Channel header.
+
+**Request:**
+```bash
+curl -X POST "http://localhost:8000/api/v1/query" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "X-Channel: whatsapp" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "How do I reset my password?",
+    "kb_id": "kb-uuid"
+  }'
+```
+
+**Supported Channels:**
+- `whatsapp` - WhatsApp Business API
+- `webchat` - Website chat widget
+- `api` - Direct API calls
+- `email` - Email integration
+- `sandbox` - Testing/development
+
+### 4. Dynamic Satisfaction Scoring
+
+Conversations are automatically scored based on user sentiment and interaction patterns:
+
+- **0.0**: Starting score (neutral/unknown)
+- **1.0-2.5**: Dissatisfied customers (needs attention)
+- **2.6-3.5**: Neutral satisfaction
+- **3.6-5.0**: Highly satisfied customers
+
+### 5. Admin Cleanup Operations
+
+**Auto-resolve old conversations:**
+```bash
+curl -X POST "http://localhost:8000/admin/cleanup-conversations?days_old=30" \
+  -H "Authorization: Bearer YOUR_ADMIN_JWT_TOKEN"
+```
+
+**Response:**
+```json
+{
+  "message": "Auto-resolved 45 conversations older than 30 days",
+  "resolved_count": 45
+}
+```
+
+### Frontend Analytics Integration
+
+```javascript
+class AnalyticsDashboard {
+  constructor() {
+    this.token = localStorage.getItem('token');
+    this.orgId = this.getCurrentOrgId();
+  }
+
+  // Get organization metrics
+  async getMetrics() {
+    try {
+      const response = await fetch(`/orgs/${this.orgId}/metrics`, {
+        headers: { 'Authorization': `Bearer ${this.token}` }
+      });
+
+      if (response.status === 403) {
+        console.warn('Admin access required for metrics');
+        return null;
+      }
+
+      const data = await response.json();
+      this.displayMetrics(data);
+      return data;
+    } catch (error) {
+      console.error('Failed to load metrics:', error);
+    }
+  }
+
+  // Get topic analytics
+  async getTopicAnalytics(days = 30, limit = 20) {
+    try {
+      const response = await fetch(`/orgs/${this.orgId}/topics?days=${days}&limit=${limit}`, {
+        headers: { 'Authorization': `Bearer ${this.token}` }
+      });
+
+      if (response.status === 403) {
+        console.warn('Admin access required for topic analytics');
+        return null;
+      }
+
+      const data = await response.json();
+      this.displayTopicChart(data.top_topics);
+      return data;
+    } catch (error) {
+      console.error('Failed to load topic analytics:', error);
+    }
+  }
+
+  // Display metrics dashboard
+  displayMetrics(metrics) {
+    const dashboard = document.getElementById('analytics-dashboard');
+    dashboard.innerHTML = `
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <h3>Total Conversations</h3>
+          <div class="metric-value">${metrics.total_conversations}</div>
+        </div>
+        <div class="metric-card">
+          <h3>AI Resolution Rate</h3>
+          <div class="metric-value">${metrics.ai_resolution_rate}%</div>
+        </div>
+        <div class="metric-card">
+          <h3>Avg Response Time</h3>
+          <div class="metric-value">${metrics.average_response_time}s</div>
+        </div>
+        <div class="metric-card">
+          <h3>Avg Satisfaction</h3>
+          <div class="metric-value">${metrics.average_satisfaction_score || 'N/A'}</div>
+        </div>
+        <div class="metric-card">
+          <h3>Escalation Rate</h3>
+          <div class="metric-value">${metrics.escalation_rate}%</div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Display topic analysis chart
+  displayTopicChart(topics) {
+    const ctx = document.getElementById('topic-chart').getContext('2d');
+    new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: topics.map(t => t.topic),
+        datasets: [{
+          label: 'Conversations',
+          data: topics.map(t => t.frequency),
+          backgroundColor: 'rgba(54, 162, 235, 0.5)',
+          borderColor: 'rgba(54, 162, 235, 1)',
+          borderWidth: 1
+        }]
+      },
+      options: {
+        responsive: true,
+        scales: {
+          y: {
+            beginAtZero: true
+          }
+        }
+      }
+    });
+  }
+
+  // Get current organization ID
+  getCurrentOrgId() {
+    // Extract from user metadata or local storage
+    const user = JSON.parse(localStorage.getItem('user') || '{}');
+    return user.org_id;
+  }
+}
+
+// Initialize analytics dashboard
+const analytics = new AnalyticsDashboard();
+
+// Load data on page load
+document.addEventListener('DOMContentLoaded', async () => {
+  await analytics.getMetrics();
+  await analytics.getTopicAnalytics(30, 10);
+});
 ```
 
 ## Error Handling
