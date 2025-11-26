@@ -419,6 +419,96 @@ def retry_smtp_operation(
     return decorator
 
 
+def retry_http_request(
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+    exponential_base: float = 2.0,
+    max_delay: float = 30.0,
+    jitter: bool = True,
+    exceptions: tuple = (Exception,)
+):
+    """
+    Decorator specifically for HTTP request retry with exponential backoff.
+
+    This is a specialized version of retry_async designed for HTTP requests
+    with sensible defaults for handling network issues, timeouts, and HTTP errors.
+
+    Args:
+        max_attempts: Maximum number of retry attempts (default: 3)
+        base_delay: Base delay in seconds before first retry (default: 1.0)
+        exponential_base: Base for exponential backoff multiplier (default: 2.0)
+        max_delay: Maximum delay between retries in seconds (default: 30.0)
+        jitter: Whether to add random jitter to delays (default: True)
+        exceptions: Tuple of exceptions to retry on (default: all exceptions)
+
+    Returns:
+        Decorator function that can be applied to async functions
+
+    Example:
+        @retry_http_request(max_attempts=5)
+        async def my_http_function():
+            return await make_http_request()
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            config = RetryConfig(
+                max_attempts=max_attempts,
+                base_delay=base_delay,
+                exponential_base=exponential_base,
+                max_delay=max_delay,
+                jitter=jitter,
+                exceptions=exceptions
+            )
+
+            # Add specific handling for common HTTP errors
+            http_specific_exceptions = (
+                Exception,  # Base exception
+            )
+
+            # Import specific HTTP-related exceptions if available
+            try:
+                import aiohttp
+                http_specific_exceptions = (
+                    aiohttp.ClientError,
+                    aiohttp.ClientConnectionError,
+                    aiohttp.ClientTimeout,
+                    aiohttp.ClientResponseError,
+                    aiohttp.ServerTimeoutError,
+                    ConnectionError,
+                    TimeoutError,
+                    OSError,
+                    Exception
+                )
+            except ImportError:
+                # If aiohttp not available, try requests
+                try:
+                    from requests.exceptions import (
+                        ConnectionError,
+                        Timeout,
+                        HTTPError,
+                        RequestException
+                    )
+                    http_specific_exceptions = (
+                        ConnectionError,
+                        Timeout,
+                        HTTPError,
+                        RequestException,
+                        Exception
+                    )
+                except ImportError:
+                    # If neither available, use generic exceptions
+                    pass
+
+            # Update config with HTTP-specific exceptions
+            config.exceptions = http_specific_exceptions
+
+            return await retry_with_backoff(func, *args, config=config, **kwargs)
+
+        return wrapper
+    return decorator
+
+
 def retry_ai_request(
     max_attempts: int = 3,
     base_delay: float = 1.0,
@@ -429,10 +519,10 @@ def retry_ai_request(
 ):
     """
     Decorator specifically for AI request retry with exponential backoff.
-    
+
     This is a specialized version of retry_async designed for AI API calls
     with sensible defaults for handling rate limits and transient failures.
-    
+
     Args:
         max_attempts: Maximum number of retry attempts (default: 3)
         base_delay: Base delay in seconds before first retry (default: 1.0)
@@ -440,10 +530,10 @@ def retry_ai_request(
         max_delay: Maximum delay between retries in seconds (default: 60.0)
         jitter: Whether to add random jitter to delays (default: True)
         exceptions: Tuple of exceptions to retry on (default: all exceptions)
-    
+
     Returns:
         Decorator function that can be applied to async functions
-        
+
     Example:
         @retry_ai_request(max_attempts=5)
         async def my_ai_function():
@@ -460,23 +550,23 @@ def retry_ai_request(
                 jitter=jitter,
                 exceptions=exceptions
             )
-            
+
             # Add specific handling for common AI API errors
             ai_specific_exceptions = (
                 Exception,  # Base exception
             )
-            
+
             # Import specific AI-related exceptions if available
             try:
                 from requests.exceptions import (
-                    ConnectionError, 
-                    Timeout, 
+                    ConnectionError,
+                    Timeout,
                     HTTPError,
                     RequestException
                 )
                 ai_specific_exceptions = (
                     ConnectionError,
-                    Timeout, 
+                    Timeout,
                     HTTPError,
                     RequestException,
                     Exception
@@ -484,11 +574,11 @@ def retry_ai_request(
             except ImportError:
                 # If requests not available, use generic exceptions
                 pass
-            
+
             # Update config with AI-specific exceptions
             config.exceptions = ai_specific_exceptions
-            
+
             return await retry_with_backoff(func, *args, config=config, **kwargs)
-        
+
         return wrapper
     return decorator

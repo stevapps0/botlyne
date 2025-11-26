@@ -137,10 +137,18 @@ async def process_url_background(url_id: str, kb_id: str, url: str):
             # Add chunk sizes to metadata for monitoring
             for chunk in vectorized_data:
                 chunk["metadata"]["chunk_size"] = len(chunk["content"])
-            ingestion_service.load_to_supabase(vectorized_data, kb_id, url_id)
+            chunks_created = ingestion_service.load_to_supabase(vectorized_data, kb_id, url_id)
 
-        # Update status to completed
-        supabase.table("files").update({"status": "completed"}).eq("id", url_id).execute()
+            if chunks_created > 0:
+                # Update status to completed only after successful DB insertion
+                supabase.table("files").update({"status": "completed"}).eq("id", url_id).execute()
+                logger.info(f"Successfully processed URL {url} with {chunks_created} chunks")
+            else:
+                logger.error(f"Failed to load chunks to DB for URL {url}")
+                supabase.table("files").update({"status": "failed"}).eq("id", url_id).execute()
+        else:
+            logger.error(f"URL processing failed for {url}: {processed.error}")
+            supabase.table("files").update({"status": "failed"}).eq("id", url_id).execute()
 
     except Exception as e:
         logger.error(f"Background processing failed for URL {url}: {e}")

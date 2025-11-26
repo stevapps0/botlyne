@@ -173,7 +173,7 @@ class WebScraper:
                     response = await client.post(
                         f"{Config.SCRAPING_SERVICE_URL}/scrape",
                         json={"urls": [url]},
-                        headers={"Authorization": f"Bearer {Config.OPENLYNE_API_KEY}"},
+                        headers={"Authorization": f"Bearer {Config.SCRAPING_API_KEY}"},
                         timeout=Config.HTTP_TIMEOUT
                     )
                     
