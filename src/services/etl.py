@@ -170,10 +170,15 @@ class WebScraper:
             """Inner function with retry logic"""
             try:
                 async with httpx.AsyncClient() as client:
+                    # Prepare headers - only include Authorization if API key is set
+                    headers = {"Content-Type": "application/json"}
+                    if Config.SCRAPING_API_KEY:
+                        headers["Authorization"] = f"Bearer {Config.SCRAPING_API_KEY}"
+
                     response = await client.post(
                         f"{Config.SCRAPING_SERVICE_URL}/scrape",
                         json={"urls": [url]},
-                        headers={"Authorization": f"Bearer {Config.SCRAPING_API_KEY}"},
+                        headers=headers,
                         timeout=Config.HTTP_TIMEOUT
                     )
                     
