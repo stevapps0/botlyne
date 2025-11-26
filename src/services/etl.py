@@ -172,8 +172,11 @@ class WebScraper:
                 async with httpx.AsyncClient() as client:
                     # Prepare headers - only include Authorization if API key is set
                     headers = {"Content-Type": "application/json"}
+                    logger.info(f"SCRAPING_API_KEY configured: {'Yes' if Config.SCRAPING_API_KEY else 'No'} (length: {len(Config.SCRAPING_API_KEY) if Config.SCRAPING_API_KEY else 0})")
                     if Config.SCRAPING_API_KEY:
                         headers["Authorization"] = f"Bearer {Config.SCRAPING_API_KEY}"
+
+                    logger.info(f"Sending scrape request to {Config.SCRAPING_SERVICE_URL}/scrape with headers: {headers}")
 
                     response = await client.post(
                         f"{Config.SCRAPING_SERVICE_URL}/scrape",
@@ -181,18 +184,20 @@ class WebScraper:
                         headers=headers,
                         timeout=Config.HTTP_TIMEOUT
                     )
-                    
+
                     # Raise for HTTP errors (triggers retry on 5xx via decorator)
                     response.raise_for_status()
-                    
+
                     data = response.json()
+                    logger.info(f"Scraping service response data: {data}")
                     # Handle response - may be array or single object
                     result_data = data[0] if isinstance(data, list) and len(data) > 0 else data
+                    logger.info(f"Extracted result_data: {result_data}")
                     
                     return ProcessedItem(
                         id=item_id,
-                        title=result_data.get("title"),
-                        content=result_data.get("content", ""),
+                        title=result_data.get("data", {}).get("title"),
+                        content=result_data.get("data", {}).get("content", ""),
                         metadata={
                             "url": url,
                             "status_code": result_data.get("status_code"),
