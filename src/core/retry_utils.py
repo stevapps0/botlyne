@@ -475,25 +475,17 @@ def retry_http_request(
                     aiohttp.ClientTimeout,
                     aiohttp.ClientResponseError,
                     aiohttp.ServerTimeoutError,
-                    ConnectionError,
-                    TimeoutError,
-                    OSError,
                     Exception
                 )
             except ImportError:
                 # If aiohttp not available, try requests
                 try:
-                    from requests.exceptions import (
-                        ConnectionError,
-                        Timeout,
-                        HTTPError,
-                        RequestException
-                    )
+                    import requests.exceptions
                     http_specific_exceptions = (
-                        ConnectionError,
-                        Timeout,
-                        HTTPError,
-                        RequestException,
+                        requests.exceptions.ConnectionError,
+                        requests.exceptions.Timeout,
+                        requests.exceptions.HTTPError,
+                        requests.exceptions.RequestException,
                         Exception
                     )
                 except ImportError:
