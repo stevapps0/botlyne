@@ -106,8 +106,7 @@ class AIService:
                     await ConversationCRUD.update_escalation_status(
                         conv_id=conv_id,
                         escalation_status="escalating",
-                        escalated_by="ai",
-                        escalation_reason=response.escalation_reason
+                        escalated_by="ai"
                     )
 
                     # Update metrics to reflect handoff
@@ -272,7 +271,7 @@ class AIService:
                 return
 
             conversation = conv_result.data
-            escalation_reason = conversation.get("escalation_reason", "AI determined human assistance was needed")
+            escalation_reason = "AI determined human assistance was needed"  # Default reason since column doesn't exist
 
             # Get all organization users' emails
             kb_result = supabase.table("knowledge_bases").select("org_id").eq("id", conversation["kb_id"]).single().execute()

@@ -351,7 +351,6 @@ class HumanAgentWorkflowService:
             supabase.table("conversations").update({
                 "status": "escalated",
                 "escalated_at": "now()",
-                "escalation_reason": reason,
                 "escalated_by": escalated_by
             }).eq("id", conversation_id).execute()
             

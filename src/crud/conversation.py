@@ -77,8 +77,6 @@ class ConversationCRUD:
             }
             if contact:
                 update_data["contact"] = contact
-            if escalation_reason:
-                update_data["escalation_reason"] = escalation_reason
 
             supabase.table("conversations").update(update_data).eq("id", str(conv_id)).execute()
             return True

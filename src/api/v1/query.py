@@ -105,31 +105,45 @@ class ConversationResponse(BaseModel):
     ticket_number: Optional[str] = None
 
 def detect_handoff_intent(response: str, query: str, tools_used: List[str] = None) -> bool:
-    """Simple heuristic to detect if human handoff is needed"""
-    # More specific handoff keywords - avoid false positives from normal responses
+    """Enhanced heuristic to detect if human handoff is needed"""
+    # Expanded handoff keywords - include more escalation signals
     handoff_keywords = [
         "human assistance", "speak to human", "talk to person", "real person",
         "live support", "supervisor", "manager", "escalate this", "transfer me",
         "can't assist", "unable to help", "don't have that information",
-        "beyond my capabilities", "need human help"
+        "beyond my capabilities", "need human help", "escalated", "escalate",
+        "no one is replying", "not responding", "no response", "help me",
+        "make them hear me out", "frustrated", "angry", "complaint",
+        "urgent", "emergency", "stuck", "blocked", "can't resolve",
+        "not working", "doesn't work", "broken", "failed", "issue",
+        "problem", "trouble", "error", "bug", "glitch", "malfunction"
     ]
 
     # Check query for explicit escalation requests
     query_lower = query.lower()
     query_escalation = any(keyword in query_lower for keyword in [
-        "human", "person", "supervisor", "manager", "escalate", "transfer"
+        "human", "person", "supervisor", "manager", "escalate", "transfer",
+        "help me", "assist me", "support", "contact", "reach out"
     ])
 
     # Check response for clear inability to help (but not normal agent references)
     response_lower = response.lower()
     response_limitation = any(phrase in response_lower for phrase in [
         "can't help", "cannot assist", "unable to help", "don't know",
-        "beyond my capabilities", "need human help"
+        "beyond my capabilities", "need human help", "escalate this"
     ])
 
-    # Only trigger if query explicitly requests escalation OR response clearly indicates limitation
-    # Remove the "no tools used" check as it's causing false positives
-    return query_escalation or response_limitation
+    # Check for repeated frustration or follow-up on unresolved issues
+    frustration_indicators = [
+        "still not working", "still having issues", "still can't", "still no",
+        "waiting for response", "no reply", "no answer", "ignored",
+        "not helpful", "useless", "waste of time"
+    ]
+
+    query_frustration = any(indicator in query_lower for indicator in frustration_indicators)
+
+    # Trigger escalation if any of these conditions are met
+    return query_escalation or response_limitation or query_frustration
 
 
 def detect_resolution_intent(message: str) -> bool:
@@ -422,46 +436,60 @@ async def process_query_request(data: QueryRequest, org_id: str, kb_id: str = No
                         }).eq("id", conversation_id).execute()
                         logger.info(f"📝 UPDATED CONVERSATION CHANNEL - ID: {conversation_id}, Channel: {channel_override}")
             else:
-                # Generate compact ISO date-based ticket number (fits in 6 chars)
-                from datetime import datetime
-                today = datetime.utcnow().strftime('%y%m%d')  # YYMMDD format
+                # Generate unique ticket number with retry logic to handle race conditions
+                max_retries = 5
+                ticket_number = None
+                conversation_id = None
 
-                # Get next sequential number for today (2 digits to fit 6 char limit)
-                existing_tickets = supabase.table("conversations").select("ticket_number").ilike("ticket_number", f"T{today}%").execute()
-                existing_numbers = []
-                if existing_tickets.data:
-                    for ticket in existing_tickets.data:
-                        if ticket.get("ticket_number") and len(ticket["ticket_number"]) == 6:
-                            try:
-                                num_part = ticket["ticket_number"][5:]  # Last 2 chars
-                                existing_numbers.append(int(num_part))
-                            except (ValueError, IndexError):
-                                continue
+                for attempt in range(max_retries):
+                    try:
+                        # Generate compact ISO date-based ticket number with random component (fits in 6 chars)
+                        from datetime import datetime, timezone
+                        today = datetime.now(timezone.utc).strftime('%y%m%d')  # YYMMDD format
 
-                next_number = max(existing_numbers) + 1 if existing_numbers else 1
-                if next_number > 99:  # Reset if we exceed 2 digits
-                    next_number = 1
-                ticket_number = f"T{today}{next_number:02d}"
-                logger.info(f"🆕 CREATING NEW CONVERSATION - Ticket: {ticket_number}")
+                        # Generate random 2-digit number (00-99) to avoid sequential collision issues
+                        import random
+                        random_number = random.randint(0, 99)
+                        ticket_number = f"T{today}{random_number:02d}"
 
-                # Determine channel (header override takes precedence)
-                detected_channel = channel_override or "api"
+                        # Check if this ticket number already exists (rare but possible)
+                        existing_check = supabase.table("conversations").select("id").eq("ticket_number", ticket_number).execute()
+                        if existing_check.data:
+                            # If it exists, try a different random number
+                            continue
 
-                # Prepare conversation data with metadata
-                conv_data = {
-                    "user_id": effective_user_id,
-                    "kb_id": effective_kb_id,
-                    "ticket_number": ticket_number,
-                    "channel": detected_channel
-                }
+                        # Determine channel (header override takes precedence)
+                        detected_channel = channel_override or "api"
 
-                # Note: No metadata column in conversations table per schema
-                # Channel is stored in dedicated channel column
-                logger.info(f"📝 CONVERSATION CHANNEL - {detected_channel}")
+                        # Prepare conversation data with metadata
+                        conv_data = {
+                            "user_id": effective_user_id,
+                            "kb_id": effective_kb_id,
+                            "ticket_number": ticket_number,
+                            "channel": detected_channel
+                        }
 
-                conv_result = supabase.table("conversations").insert(conv_data).execute()
-                conversation_id = conv_result.data[0]["id"]
-                logger.info(f"✅ CONVERSATION CREATED - ID: {conversation_id}")
+                        # Note: No metadata column in conversations table per schema
+                        # Channel is stored in dedicated channel column
+                        logger.info(f"📝 CONVERSATION CHANNEL - {detected_channel}")
+
+                        conv_result = supabase.table("conversations").insert(conv_data).execute()
+                        conversation_id = conv_result.data[0]["id"]
+                        logger.info(f"✅ CONVERSATION CREATED - ID: {conversation_id}, Ticket: {ticket_number}")
+                        break  # Success, exit retry loop
+
+                    except Exception as e:
+                        error_str = str(e)
+                        if ("duplicate key value violates unique constraint" in error_str or
+                            "ticket_number" in error_str) and attempt < max_retries - 1:
+                            logger.warning(f"Ticket number {ticket_number} collision detected, generating new random number... (attempt {attempt + 1}/{max_retries})")
+                            continue  # Retry with new random number
+                        else:
+                            # Re-raise if not a ticket collision error or max retries reached
+                            raise e
+
+                if not conversation_id:
+                    raise HTTPException(status_code=500, detail="Failed to create conversation after multiple attempts")
 
                 # Initialize satisfaction score at 0.0 for new conversations (neutral/unknown)
                 try:
@@ -589,9 +617,9 @@ Respond as a member of the {org_context['name']} support team."""
             # Calculate and store resolution time
             conv_check = supabase.table("conversations").select("started_at").eq("id", conversation_id).single().execute()
             if conv_check.data and conv_check.data.get("started_at"):
-                from datetime import datetime
+                from datetime import datetime, timezone
                 start_time = datetime.fromisoformat(conv_check.data["started_at"].replace('Z', '+00:00'))
-                resolution_seconds = (datetime.utcnow() - start_time).total_seconds()
+                resolution_seconds = (datetime.now(timezone.utc) - start_time).total_seconds()
 
                 supabase.table("metrics").update({
                     "resolution_time": resolution_seconds
@@ -801,7 +829,7 @@ async def resolve_conversation(
 
             if started_at and resolved_at:
                 # Calculate resolution time in seconds
-                from datetime import datetime
+                from datetime import datetime, timezone
                 start_time = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
                 end_time = datetime.fromisoformat(resolved_at.replace('Z', '+00:00'))
                 resolution_seconds = (end_time - start_time).total_seconds()
@@ -829,10 +857,10 @@ async def cleanup_old_conversations(
 ):
     """Automatically resolve conversations older than specified days (admin only)"""
     try:
-        from datetime import datetime, timedelta
+        from datetime import datetime, timezone, timedelta
 
         # Find conversations older than specified days that are still ongoing
-        cutoff_date = datetime.utcnow() - timedelta(days=days_old)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_old)
 
         old_conversations = supabase.table("conversations").select("id, started_at").eq("status", "ongoing").lt("started_at", cutoff_date.isoformat()).execute()
 
@@ -850,7 +878,7 @@ async def cleanup_old_conversations(
             # Calculate and store resolution time
             if started_at:
                 start_time = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
-                resolution_seconds = (datetime.utcnow() - start_time).total_seconds()
+                resolution_seconds = (datetime.now(timezone.utc) - start_time).total_seconds()
 
                 supabase.table("metrics").update({
                     "resolution_time": resolution_seconds

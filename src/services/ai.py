@@ -6,7 +6,7 @@ import os
 import logging
 import pytz
 from datetime import datetime
-import supabase
+from src.core.database import supabase
 import sympy as sp
 
 from src.core.config import settings
